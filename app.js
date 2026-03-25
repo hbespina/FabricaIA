@@ -7,70 +7,85 @@ async function analyzeData() {
     const resultsDiv = document.getElementById('results');
     resultsDiv.style.display = 'block';
 
-    // Motor de Detección Heurística V2.2
-    const hasOracle = rawData.toLowerCase().includes('oracle');
-    const hasJava = rawData.toLowerCase().includes('java');
-    const hasTomcat = rawData.toLowerCase().includes('tomcat');
-    const isRHEL4 = rawData.includes('release 4');
-    
-    // Extracción de Hostname (ejemplo básico)
-    const hostnameMatch = rawData.match(/hostname[=\s]+([^\s\n]+)/i) || ["", "Unknown-Host"];
-    const hostname = hostnameMatch[1];
+    // Motor de Parsing Estructural V2.3
+    const sections = rawData.split('---');
+    let hostname = "Unknown-Host";
+    let osInfo = "Unknown OS";
+    let processes = "";
+    let envVars = "";
+
+    // Extraer secciones y hostname primario
+    const hostLine = rawData.match(/HOSTNAME:\s+([^\n\r]+)/i);
+    if (hostLine) hostname = hostLine[1].trim();
+
+    sections.forEach(s => {
+        if (s.includes('OS RELEASE')) osInfo = s.replace('OS RELEASE ---', '').trim();
+        if (s.includes('PROCESSES')) processes = s;
+        if (s.includes('ENV VARIABLES')) envVars = s;
+    });
+
+    const isLegacy = osInfo.toLowerCase().includes('release 4') || osInfo.toLowerCase().includes('release 5');
+    const hasOracle = rawData.toLowerCase().includes('oracle') || processes.toLowerCase().includes('tnslsnr');
+    const hasJava = rawData.toLowerCase().includes('java') || processes.toLowerCase().includes('java');
+    const hasTomcat = processes.toLowerCase().includes('tomcat') || processes.toLowerCase().includes('catalina');
+    const hasNginx = processes.toLowerCase().includes('nginx');
+    const hasPython = processes.toLowerCase().includes('python');
 
     const analysis = {
         sre_analysis: {
-            risk_score: isRHEL4 ? 9 : 5,
-            complexity_score: hasJava && isRHEL4 ? 8 : 4,
-            readiness_level: isRHEL4 ? "Crítica" : "Media",
+            risk_score: isLegacy ? 9 : 3,
+            complexity_score: isLegacy ? 8 : 2,
+            readiness_level: isLegacy ? "Crítica" : "Excelente",
             critical_vulnerabilities: []
         },
         financial_impact: {
-            migration_effort_hours: isRHEL4 ? 480 : 120,
-            estimated_migration_cost_usd: isRHEL4 ? 15000 : 5000,
+            migration_effort_hours: isLegacy ? 480 : 40,
+            estimated_migration_cost_usd: isLegacy ? 15000 : 2000,
             projected_cloud_monthly_usd: 1200,
-            savings_vs_onprem_pct: 35,
-            payback_months: isRHEL4 ? 12 : 6,
-            cost_of_inaction_annual: isRHEL4 ? 85000 : 25000
+            savings_vs_onprem_pct: isLegacy ? 35 : 15,
+            payback_months: isLegacy ? 12 : 4,
+            cost_of_inaction_annual: isLegacy ? 85000 : 5000
         },
         target_architecture: {
             provider: "AWS",
-            compute: "Amazon EKS",
-            database_path: hasOracle ? ["Oracle 8 (Legacy)", "RDS Custom (Oracle 19c)"] : ["N/A (Capa de Aplicación Pura)"],
+            compute: isLegacy ? "Amazon EKS" : "AWS App Runner / Lambda",
+            database_path: hasOracle ? ["Oracle Legacy", "RDS Custom"] : ["N/A"],
             mermaid_graph: ""
         },
         inventory_analytics: [],
         deployment_artifacts: {
-            terraform_snippet: `resource "aws_eks_cluster" "factory" {\n  name = "modernization-${hostname}"\n}`,
-            nginx_config: `server {\n    listen 80;\n    # Sticky sessions para ${hostname}\n    proxy_cookie_path / "/; HTTPOnly; Secure";\n}`,
-            k8s_manifest: `apiVersion: v1\nkind: Deployment\nmetadata:\n  name: ${hostname.toLowerCase()}`
+            terraform_snippet: `resource "aws_eks_cluster" "factory" {\n  name = "modernization-${hostname.toLowerCase()}"\n}`,
+            nginx_config: `server {\n    listen 80;\n    server_name ${hostname};\n    proxy_cookie_path / "/; HTTPOnly; Secure";\n}`,
+            k8s_manifest: `apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: ${hostname.toLowerCase().split('.')[0]}`
         },
         system: {
             hostname: hostname,
-            os: isRHEL4 ? "RHEL 4 (Legacy)" : "Modern OS",
+            os: osInfo.split('\n')[0],
             stack: []
         }
     };
 
-    // Construcción dinámica basada en detecciones
-    if (isRHEL4) {
-        analysis.sre_analysis.critical_vulnerabilities.push("Kernel 2.6 es incompatible con kernels modernos (6.x)");
-        analysis.sre_analysis.critical_vulnerabilities.push("Falta de parches de seguridad (End of Life)");
+    // Inteligencia de Análisis
+    if (isLegacy) {
+        analysis.sre_analysis.critical_vulnerabilities.push("Incompatibilidad de Kernel (2.6 vs 6.x)");
+        analysis.sre_analysis.critical_vulnerabilities.push("Vulnerabilidad crítica en Glibc detectada");
+    } else {
+        analysis.sre_analysis.critical_vulnerabilities.push("Sistema Moderno: Migración 'Lift & Shift' sugerida via App Runner");
     }
+
     if (hasJava) {
-        analysis.system.stack.push("Java Detected");
-        analysis.inventory_analytics.push({ item: "JDK Runtime", version: "Legacy", action: "Refactor", modern_alternative: "OpenJDK 17" });
+        analysis.system.stack.push("Java");
+        analysis.inventory_analytics.push({ item: "Java Runtime", version: "Detected", action: isLegacy ? "Refactor" : "Rehost", modern_alternative: "Amazon Corretto 17" });
     }
     if (hasTomcat) {
         analysis.system.stack.push("Tomcat");
-        analysis.inventory_analytics.push({ item: "Tomcat Instance", version: "EOL", action: "Rehost/Refactor", modern_alternative: "Tomcat 10+" });
+        analysis.inventory_analytics.push({ item: "Tomcat", version: "Detected", action: "Containerize", modern_alternative: "AWS Fargate" });
     }
-    if (hasOracle) {
-        analysis.system.stack.push("Oracle DB");
-        analysis.inventory_analytics.push({ item: "Oracle Database", version: "Legacy", action: "Rehost", modern_alternative: "RDS Custom" });
-    }
+    if (hasNginx) analysis.system.stack.push("NGINX");
+    if (hasPython) analysis.system.stack.push("Python");
 
-    // Generar Diagrama Mermaid Dinámico
-    let mGraph = `graph TD\n    A[Internet] --> B[NGINX Ingress]\n    B --> C[Pod: ${hostname}]`;
+    // Gráfico Dinámico V2.3
+    let mGraph = `graph TD\n    A[Internet] --> B[Load Balancer]\n    B --> C[Compute: ${analysis.target_architecture.compute}]`;
     if (hasOracle) mGraph += `\n    C --> D[(RDS Custom: Oracle 19c)]`;
     analysis.target_architecture.mermaid_graph = mGraph;
 
