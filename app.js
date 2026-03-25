@@ -7,36 +7,50 @@ async function analyzeData() {
     const resultsDiv = document.getElementById('results');
     resultsDiv.style.display = 'block';
 
-    // Motor de Parsing Estructural V2.3
+    // Intento de Análisis Real via Amazon Bedrock (Fase J)
+    try {
+        console.log("Intentando análisis vía Amazon Bedrock...");
+        const response = await fetch('http://localhost:8000/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ raw_data: rawData })
+        });
+
+        if (response.ok) {
+            const bedrockAnalysis = await response.json();
+            // Si el backend devuelve un string JSON, lo parseamos
+            const result = typeof bedrockAnalysis === 'string' ? JSON.parse(bedrockAnalysis) : bedrockAnalysis;
+            return renderResults(result);
+        }
+    } catch (err) {
+        console.warn("Backend Bedrock no disponible. Usando Motor Heurístico Local V2.3.");
+    }
+
+    // --- FALLBACK: Motor de Parsing Estructural V2.3 (Local) ---
     const sections = rawData.split('---');
     let hostname = "Unknown-Host";
     let osInfo = "Unknown OS";
     let processes = "";
-    let envVars = "";
 
-    // Extraer secciones y hostname primario
     const hostLine = rawData.match(/HOSTNAME:\s+([^\n\r]+)/i);
     if (hostLine) hostname = hostLine[1].trim();
 
     sections.forEach(s => {
         if (s.includes('OS RELEASE')) osInfo = s.replace('OS RELEASE ---', '').trim();
         if (s.includes('PROCESSES')) processes = s;
-        if (s.includes('ENV VARIABLES')) envVars = s;
     });
 
     const isLegacy = osInfo.toLowerCase().includes('release 4') || osInfo.toLowerCase().includes('release 5');
     const hasOracle = rawData.toLowerCase().includes('oracle') || processes.toLowerCase().includes('tnslsnr');
     const hasJava = rawData.toLowerCase().includes('java') || processes.toLowerCase().includes('java');
     const hasTomcat = processes.toLowerCase().includes('tomcat') || processes.toLowerCase().includes('catalina');
-    const hasNginx = processes.toLowerCase().includes('nginx');
-    const hasPython = processes.toLowerCase().includes('python');
 
     const analysis = {
         sre_analysis: {
             risk_score: isLegacy ? 9 : 3,
             complexity_score: isLegacy ? 8 : 2,
             readiness_level: isLegacy ? "Crítica" : "Excelente",
-            critical_vulnerabilities: []
+            critical_vulnerabilities: isLegacy ? ["Kernel Gap 2.6", "Glibc Desactualizado"] : ["Upgrade via App Runner"]
         },
         financial_impact: {
             migration_effort_hours: isLegacy ? 480 : 40,
@@ -47,47 +61,23 @@ async function analyzeData() {
             cost_of_inaction_annual: isLegacy ? 85000 : 5000
         },
         target_architecture: {
-            provider: "AWS",
-            compute: isLegacy ? "Amazon EKS" : "AWS App Runner / Lambda",
+            provider: "AWS (Heuristic)",
+            compute: isLegacy ? "Amazon EKS" : "AWS App Runner",
             database_path: hasOracle ? ["Oracle Legacy", "RDS Custom"] : ["N/A"],
-            mermaid_graph: ""
+            mermaid_graph: `graph TD\n    A[Internet] --> B[NGINX]\n    B --> C[Pod: ${hostname}]`
         },
-        inventory_analytics: [],
+        inventory_analytics: hasJava ? [{ item: "Java Runtime", version: "Legacy", action: "Refactor", modern_alternative: "Corretto 17" }] : [],
         deployment_artifacts: {
             terraform_snippet: `resource "aws_eks_cluster" "factory" {\n  name = "modernization-${hostname.toLowerCase()}"\n}`,
-            nginx_config: `server {\n    listen 80;\n    server_name ${hostname};\n    proxy_cookie_path / "/; HTTPOnly; Secure";\n}`,
+            nginx_config: `server {\n    listen 80;\n    server_name ${hostname};\n}`,
             k8s_manifest: `apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: ${hostname.toLowerCase().split('.')[0]}`
         },
         system: {
             hostname: hostname,
             os: osInfo.split('\n')[0],
-            stack: []
+            stack: hasJava ? ["Java"] : ["Generic"]
         }
     };
-
-    // Inteligencia de Análisis
-    if (isLegacy) {
-        analysis.sre_analysis.critical_vulnerabilities.push("Incompatibilidad de Kernel (2.6 vs 6.x)");
-        analysis.sre_analysis.critical_vulnerabilities.push("Vulnerabilidad crítica en Glibc detectada");
-    } else {
-        analysis.sre_analysis.critical_vulnerabilities.push("Sistema Moderno: Migración 'Lift & Shift' sugerida via App Runner");
-    }
-
-    if (hasJava) {
-        analysis.system.stack.push("Java");
-        analysis.inventory_analytics.push({ item: "Java Runtime", version: "Detected", action: isLegacy ? "Refactor" : "Rehost", modern_alternative: "Amazon Corretto 17" });
-    }
-    if (hasTomcat) {
-        analysis.system.stack.push("Tomcat");
-        analysis.inventory_analytics.push({ item: "Tomcat", version: "Detected", action: "Containerize", modern_alternative: "AWS Fargate" });
-    }
-    if (hasNginx) analysis.system.stack.push("NGINX");
-    if (hasPython) analysis.system.stack.push("Python");
-
-    // Gráfico Dinámico V2.3
-    let mGraph = `graph TD\n    A[Internet] --> B[Load Balancer]\n    B --> C[Compute: ${analysis.target_architecture.compute}]`;
-    if (hasOracle) mGraph += `\n    C --> D[(RDS Custom: Oracle 19c)]`;
-    analysis.target_architecture.mermaid_graph = mGraph;
 
     renderResults(analysis);
 }
