@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Modernization Factory | Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- Sidebar -->
+        <aside>
+            <div class="logo">MODERNIZATION FACTORY</div>
+            <nav>
+                <ul>
+                    <li class="active">Dashboard</li>
+                    <li>Inventario Maestro</li>
+                    <li>Arquitectura Target</li>
+                    <li>Plan de Migración</li>
+                    <li>Infrastructure as Code</li>
+                </ul>
+            </nav>
+            <div style="margin-top: auto; font-size: 0.7rem; color: var(--text-secondary);">
+                ENGINE VERSION 1.0.4
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main>
+            <header>
+                <div>
+                    <h1>Modernization Engine</h1>
+                    <p style="color: var(--text-secondary);">Analizador de Sistemas Legacy Cloud-Native</p>
+                </div>
+                <div class="status-badge">Engine Ready</div>
+            </header>
+
+            <!-- Input Area -->
+            <section class="glass-card animate" style="margin-bottom: 2rem;">
+                <h3>Ingreso de Datos Crudos</h3>
+                <p style="color: var(--text-secondary); margin-bottom: 1rem;">Pega aquí la salida completa del agente 'collector.sh'</p>
+                <textarea id="raw-input" placeholder="--- START CLOUD MODERNIZATION INVENTORY --- ..."></textarea>
+                <button class="primary" onclick="analyzeData()">Iniciar Análisis Forense</button>
+            </section>
+
+            <!-- Results Section (Hidden by default) -->
+            <div id="results" style="display: none;">
+                <div class="card-grid">
+                    <div class="glass-card animate" style="text-align: center;">
+                        <h3>Score de Riesgo</h3>
+                        <div class="risk-meter">
+                            <span class="risk-value" id="risk-score">9</span>
+                            <span class="risk-label" id="risk-text">Crítico</span>
+                        </div>
+                    </div>
+                    <div class="glass-card animate">
+                        <h3>Resumen del Sistema</h3>
+                        <div id="system-summary" style="margin-top: 1rem;">
+                            <!-- Dynamic Content -->
+                        </div>
+                    </div>
+                </div>
+
+                <div class="glass-card animate" style="margin-bottom: 2rem;">
+                    <h3>Inventario Crítico (EOL/Vulnerable)</h3>
+                    <div id="inventory-table" style="margin-top: 1rem;">
+                        <!-- Dynamic Content -->
+                    </div>
+                </div>
+
+                <div class="card-grid">
+                    <div class="glass-card animate">
+                        <h3>Arquitectura Sugerida</h3>
+                        <div class="mermaid" id="mermaid-container">
+                            <!-- Diagram -->
+                        </div>
+                    </div>
+                    <div class="glass-card animate">
+                        <h3>Checklist de Modernización</h3>
+                        <ul id="migration-steps" style="list-style: none; padding-left: 1rem;">
+                            <!-- Steps -->
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="glass-card animate">
+                  <h3>Infrastructure as Code (Terraform)</h3>
+                  <pre id="iac-code" style="background:rgba(0,0,0,0.5); padding:1rem; border-radius:10px; font-size:0.8rem; overflow-x:auto;">
+                  </pre>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,197 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap');
+
+:root {
+    --bg-main: #0a0e14;
+    --bg-secondary: rgba(255, 255, 255, 0.05);
+    --glass-border: rgba(255, 255, 255, 0.1);
+    --accent-blue: #00d2ff;
+    --accent-purple: #9d50bb;
+    --accent-vibrant: linear-gradient(135deg, #00d2ff 0%, #3a7bd5 100%);
+    --accent-purple-gradient: linear-gradient(135deg, #9d50bb 0%, #6e48aa 100%);
+    --risk-high: #ff416c;
+    --risk-medium: #f9d423;
+    --risk-low: #00b09b;
+    --text-primary: #ffffff;
+    --text-secondary: #a0a0a0;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Outfit', sans-serif;
+    background-color: var(--bg-main);
+    color: var(--text-primary);
+    overflow-x: hidden;
+    line-height: 1.6;
+}
+
+.container {
+    display: flex;
+    min-height: 100vh;
+}
+
+/* Sidebar */
+aside {
+    width: 280px;
+    background: var(--bg-secondary);
+    backdrop-filter: blur(20px);
+    border-right: 1px solid var(--glass-border);
+    padding: 2rem;
+    display: flex;
+    flex-direction: column;
+}
+
+.logo {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: 3rem;
+    background: var(--accent-vibrant);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+nav ul {
+    list-style: none;
+}
+
+nav li {
+    padding: 1rem;
+    margin-bottom: 0.5rem;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    color: var(--text-secondary);
+}
+
+nav li:hover, nav li.active {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border-left: 4px solid var(--accent-blue);
+}
+
+/* Main Content */
+main {
+    flex: 1;
+    padding: 2.5rem;
+    height: 100vh;
+    overflow-y: auto;
+}
+
+header {
+    margin-bottom: 3rem;
+    display: flex;
+    justify-content: space-between;
+}
+
+.status-badge {
+    background: rgba(0, 210, 255, 0.1);
+    border: 1px solid var(--accent-blue);
+    padding: 0.5rem 1rem;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    color: var(--accent-blue);
+}
+
+/* Glass Cards */
+.card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 1.5rem;
+    margin-bottom: 2rem;
+}
+
+.glass-card {
+    background: var(--bg-secondary);
+    backdrop-filter: blur(10px);
+    border: 1px solid var(--glass-border);
+    border-radius: 24px;
+    padding: 1.5rem;
+    transition: transform 0.3s ease;
+}
+
+.glass-card:hover {
+    transform: translateY(-5px);
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* Risk Meter */
+.risk-meter {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    width: 200px;
+    height: 200px;
+    margin: 1rem auto;
+}
+
+.risk-value {
+    font-size: 3.5rem;
+    font-weight: 700;
+}
+
+.risk-label {
+    position: absolute;
+    bottom: 20px;
+    font-size: 0.9rem;
+    color: var(--risk-high);
+}
+
+/* Textarea for Raw Data */
+.input-section {
+    width: 100%;
+    margin-bottom: 2rem;
+}
+
+textarea {
+    width: 100%;
+    height: 150px;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--glass-border);
+    border-radius: 16px;
+    padding: 1rem;
+    color: #fff;
+    font-family: 'Courier New', monospace;
+    resize: vertical;
+}
+
+button.primary {
+    background: var(--accent-vibrant);
+    border: none;
+    padding: 1rem 2rem;
+    border-radius: 12px;
+    color: #fff;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 1rem;
+    transition: filter 0.3s;
+}
+
+button.primary:hover {
+    filter: brightness(1.2);
+}
+
+/* Architecture Image Placeholder */
+.arch-diagram {
+    width: 100%;
+    height: 400px;
+    background: rgba(0,0,0,0.5);
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Animations */
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.animate {
+    animation: fadeIn 0.8s ease forwards;
+}
