@@ -27,20 +27,28 @@ async function analyzeData() {
             "Crear contenedor base en Amazon ECR con librerías compat-lib (glibc 2.3).",
             "Configurar RDS Custom para soporte de Oracle 8 -> 19c.",
             "Implementar NGINX Ingress con Sticky Sessions (Session Affinity).",
-            "Desplegar en EKS con Pod Security Policies endurecidas."
+            "Terminar SSL en Ingress para mitigar obsolescencia de TLS en Axis 1.x."
         ],
+        financial: {
+            opex: "$1,250",
+            migCost: "$15,000",
+            payback: "12 meses",
+            hours: "480"
+        },
+        scores: { risk: 9, complexity: 8, readiness: 4 },
         terraform: `resource "aws_eks_cluster" "modern_factory" {
   name     = "modernization-eks"
   role_arn = aws_iam_role.eks.arn
-  vpc_config {
-    subnet_ids = [aws_subnet.private.id]
-  }
-}
-
-resource "aws_db_instance" "oracle_target" {
-  engine = "custom-oracle-ee"
-  engine_version = "19"
-  instance_class = "db.m5.large"
+}`,
+        nginx: `server {
+    listen 80;
+    server_name intratest.cencosud.corp;
+    location / {
+        proxy_pass http://tomcat-service;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # Sticky session support
+        proxy_cookie_path / "/; HTTPOnly; Secure";
+    }
 }`,
         mermaid: `graph TD
     A[NGINX Ingress] --> B[EKS: Tomcat Pods]
@@ -53,9 +61,17 @@ resource "aws_db_instance" "oracle_target" {
 }
 
 function renderResults(data) {
-    // Risk Score
-    document.getElementById('risk-score').innerText = data.system.risk;
+    // Scores
+    document.getElementById('risk-score').innerText = data.scores.risk;
+    document.getElementById('complexity-score').innerText = data.scores.complexity;
+    document.getElementById('readiness-score').innerText = data.scores.readiness;
     
+    // Financials
+    document.getElementById('cloud-opex').innerText = data.financial.opex;
+    document.getElementById('migration-cost').innerText = data.financial.migCost;
+    document.getElementById('payback-period').innerText = data.financial.payback;
+    document.getElementById('man-hours').innerText = data.financial.hours;
+
     // System Summary
     const summaryDiv = document.getElementById('system-summary');
     summaryDiv.innerHTML = `
@@ -85,8 +101,9 @@ function renderResults(data) {
         </li>
     `).join('');
 
-    // IaC Section
+    // IaC & Config Section
     document.getElementById('iac-code').innerText = data.terraform;
+    document.getElementById('nginx-code').innerText = data.nginx;
 
     // Mermaid Diagram
     const mermaidContainer = document.getElementById('mermaid-container');

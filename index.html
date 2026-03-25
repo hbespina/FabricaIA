@@ -48,16 +48,46 @@
             <div id="results" style="display: none;">
                 <div class="card-grid">
                     <div class="glass-card animate" style="text-align: center;">
-                        <h3>Score de Riesgo</h3>
-                        <div class="risk-meter">
-                            <span class="risk-value" id="risk-score">9</span>
-                            <span class="risk-label" id="risk-text">Crítico</span>
+                        <h3>Modernization Scores</h3>
+                        <div style="display:flex; justify-content:space-around; margin-top:1rem;">
+                            <div class="score-indicator">
+                                <div class="risk-value" id="risk-score" style="font-size: 2rem;">9</div>
+                                <div style="font-size:0.7rem; color:var(--risk-high);">RIESGO</div>
+                            </div>
+                            <div class="score-indicator">
+                                <div class="risk-value" id="complexity-score" style="font-size: 2rem; color: #ff8c00;">8</div>
+                                <div style="font-size:0.7rem; color:#ff8c00;">COMPLEJIDAD</div>
+                            </div>
+                            <div class="score-indicator">
+                                <div class="risk-value" id="readiness-score" style="font-size: 2rem; color: var(--risk-low);">4</div>
+                                <div style="font-size:0.7rem; color:var(--risk-low);">READINESS</div>
+                            </div>
                         </div>
                     </div>
                     <div class="glass-card animate">
                         <h3>Resumen del Sistema</h3>
                         <div id="system-summary" style="margin-top: 1rem;">
                             <!-- Dynamic Content -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Financial Module [NEW V2.0] -->
+                <div class="card-grid">
+                    <div class="glass-card animate financial-card">
+                        <div class="icon-money">💰</div>
+                        <h3>Estimación TCO</h3>
+                        <div id="financial-metrics">
+                            <p>OPEX Mensual Cloud: <span id="cloud-opex" class="highlight">$0</span></p>
+                            <p>Costo de Migración: <span id="migration-cost" class="highlight">$0</span></p>
+                        </div>
+                    </div>
+                    <div class="glass-card animate financial-card">
+                        <div class="icon-money">📈</div>
+                        <h3>Retorno de Inversión</h3>
+                        <div id="roi-metrics">
+                            <p>Payback Period: <span id="payback-period" class="highlight">0 meses</span></p>
+                            <p>Horas/Hombre Est.: <span id="man-hours" class="highlight">0 hrs</span></p>
                         </div>
                     </div>
                 </div>
@@ -73,21 +103,27 @@
                     <div class="glass-card animate">
                         <h3>Arquitectura Sugerida</h3>
                         <div class="mermaid" id="mermaid-container">
-                            <!-- Diagram -->
                         </div>
                     </div>
                     <div class="glass-card animate">
-                        <h3>Checklist de Modernización</h3>
-                        <ul id="migration-steps" style="list-style: none; padding-left: 1rem;">
-                            <!-- Steps -->
+                        <h3>Recomendaciones SRE [Sprint 1]</h3>
+                        <ul id="migration-steps" style="list-style: none; padding-left: 0.5rem;">
                         </ul>
                     </div>
                 </div>
 
                 <div class="glass-card animate">
-                  <h3>Infrastructure as Code (Terraform)</h3>
-                  <pre id="iac-code" style="background:rgba(0,0,0,0.5); padding:1rem; border-radius:10px; font-size:0.8rem; overflow-x:auto;">
-                  </pre>
+                  <h3>Infrastructure as Code & Config</h3>
+                  <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
+                    <div>
+                        <p style="font-size:0.7rem; color:var(--text-secondary); margin-bottom:5px;">Terraform / K8s</p>
+                        <pre id="iac-code" class="code-block"></pre>
+                    </div>
+                    <div>
+                        <p style="font-size:0.7rem; color:var(--text-secondary); margin-bottom:5px;">NGINX Configuration</p>
+                        <pre id="nginx-code" class="code-block"></pre>
+                    </div>
+                  </div>
                 </div>
             </div>
         </main>

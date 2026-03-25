@@ -2,7 +2,13 @@
 
 Este portal permite automatizar el descubrimiento y diseño de estrategias de modernización para sistemas legacy (RHEL, Solaris, AIX).
 
-## Componentes
+## Componentes y Versiones
+
+### V2.0 - SRE & Financial Edition [NUEVO]
+- **Módulo Financiero**: Estimación de OPEX Cloud, Costos de Migración y cálculo de Payback (ROI).
+- **SRE Analytics**: Puntuación de Complejidad y Readiness para la modernización.
+- **Sprint Planner**: Recomendaciones críticas de arquitectura para el primer sprint.
+- **Expanded IaC**: Generación automática de configuraciones NGINX para legacy support.
 
 ### 1. Agente Colector (`collector.sh`)
 Script diseñado para ejecutarse incluso en kernels antiguos (RHEL 4+).
