@@ -11,66 +11,62 @@ async function analyzeData() {
 
     // Mock Data basado en el análisis previo de RHEL 4
     const analysis = {
-        system: {
-            hostname: "g100603sv446.cencosud.corp",
-            os: "Red Hat Enterprise Linux ES release 4 (Update 6)",
-            risk: 9,
-            stack: ["Java 1.4", "Tomcat", "Axis SOAP", "Apache 2.0"]
+        sre_analysis: {
+            risk_score: 9,
+            complexity_score: 8,
+            readiness_level: "Baja",
+            critical_vulnerabilities: ["SSL/TLS v1.0", "Glibc Stack Overflow (Legacy)", "Unsupported Kernel 2.6"]
         },
-        inventory: [
-            { comp: "JDK", ver: "1.4.2_06", status: "Critical", icon: "🔴" },
-            { comp: "Apache Axis", ver: "1.1/1.2/1.3", status: "EOL", icon: "⚠️" },
-            { comp: "Tomcat", ver: "Multiple Instances", status: "High Risk", icon: "🔴" },
-            { comp: "Altiris", ver: "Legacy Agent", status: "Shadow", icon: "🔍" }
-        ],
-        steps: [
-            "Crear contenedor base en Amazon ECR con librerías compat-lib (glibc 2.3).",
-            "Configurar RDS Custom para soporte de Oracle 8 -> 19c.",
-            "Implementar NGINX Ingress con Sticky Sessions (Session Affinity).",
-            "Terminar SSL en Ingress para mitigar obsolescencia de TLS en Axis 1.x."
-        ],
-        financial: {
-            opex: "$1,250",
-            migCost: "$15,000",
-            payback: "12 meses",
-            hours: "480"
+        financial_impact: {
+            migration_effort_hours: 480,
+            estimated_migration_cost_usd: 15000,
+            projected_cloud_monthly_usd: 1250,
+            savings_vs_onprem_pct: 35,
+            payback_months: 12,
+            cost_of_inaction_annual: 85000
         },
-        scores: { risk: 9, complexity: 8, readiness: 4 },
-        terraform: `resource "aws_eks_cluster" "modern_factory" {
-  name     = "modernization-eks"
-  role_arn = aws_iam_role.eks.arn
-}`,
-        nginx: `server {
-    listen 80;
-    server_name intratest.cencosud.corp;
-    location / {
-        proxy_pass http://tomcat-service;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        # Sticky session support
-        proxy_cookie_path / "/; HTTPOnly; Secure";
-    }
-}`,
-        mermaid: `graph TD
-    A[NGINX Ingress] --> B[EKS: Tomcat Pods]
+        target_architecture: {
+            provider: "AWS",
+            compute: "Amazon EKS",
+            database_path: ["Oracle 8 (Legacy)", "RDS Custom (Oracle 19c)", "Aurora PostgreSQL"],
+            mermaid_graph: `graph TD
+    A[NGINX Ingress] --> B[EKS Pods: Tomcat 1.4]
     B --> C[(RDS Custom: Oracle 19c)]
     style B fill:#3a7bd5,stroke:#fff,color:#fff
     style C fill:#9d50bb,stroke:#fff,color:#fff`
+        },
+        inventory_analytics: [
+            { item: "JDK", version: "1.4.2_06", action: "Refactor", modern_alternative: "OpenJDK 17" },
+            { item: "Apache Axis", version: "1.3", action: "Replace", modern_alternative: "Spring Web Services" },
+            { item: "Oracle DB", version: "8.1.7", action: "Rehost", modern_alternative: "RDS Custom 19c" }
+        ],
+        deployment_artifacts: {
+            terraform_snippet: `resource "aws_eks_cluster" "v2_1" {\n  name = "modernization-v2-1"\n}`,
+            nginx_config: `server {\n    listen 80;\n    # Sticky session for Legacy\n    proxy_cookie_path / "/; HTTPOnly; Secure";\n}`,
+            k8s_manifest: `apiVersion: v1\nkind: Pod\nmetadata:\n  name: legacy-app`
+        },
+        system: { // Legacy fallback
+            hostname: "g100603sv446.cencosud.corp",
+            os: "RHEL 4 (Update 6)",
+            stack: ["Java 1.4", "Tomcat", "Axis"]
+        }
     };
 
     renderResults(analysis);
 }
 
 function renderResults(data) {
-    // Scores
-    document.getElementById('risk-score').innerText = data.scores.risk;
-    document.getElementById('complexity-score').innerText = data.scores.complexity;
-    document.getElementById('readiness-score').innerText = data.scores.readiness;
+    // SRE Scores V2.1
+    document.getElementById('risk-score').innerText = data.sre_analysis.risk_score;
+    document.getElementById('complexity-score').innerText = data.sre_analysis.complexity_score;
+    document.getElementById('readiness-score').innerText = data.sre_analysis.readiness_level;
+    document.getElementById('compliance-gap').innerText = "HIGH";
     
-    // Financials
-    document.getElementById('cloud-opex').innerText = data.financial.opex;
-    document.getElementById('migration-cost').innerText = data.financial.migCost;
-    document.getElementById('payback-period').innerText = data.financial.payback;
-    document.getElementById('man-hours').innerText = data.financial.hours;
+    // Financial Impact V2.1
+    document.getElementById('cloud-opex').innerText = `$${data.financial_impact.projected_cloud_monthly_usd}`;
+    document.getElementById('migration-cost').innerText = `$${data.financial_impact.estimated_migration_cost_usd}`;
+    document.getElementById('payback-period').innerText = `${data.financial_impact.payback_months} meses`;
+    document.getElementById('inaction-cost').innerText = `$${data.financial_impact.cost_of_inaction_annual}`;
 
     // System Summary
     const summaryDiv = document.getElementById('system-summary');
@@ -82,33 +78,33 @@ function renderResults(data) {
         </div>
     `;
 
-    // Inventory Table
+    // Inventory Analytics V2.1
     const invDiv = document.getElementById('inventory-table');
-    invDiv.innerHTML = data.inventory.map(i => `
+    invDiv.innerHTML = data.inventory_analytics.map(i => `
         <div style="display:flex; justify-content:space-between; padding:0.8rem; border-bottom:1px solid var(--glass-border);">
-            <span>${i.icon} ${i.comp}</span>
-            <span style="color:var(--text-secondary);">${i.ver}</span>
-            <span style="color:var(--risk-high);">${i.status}</span>
+            <span>${i.item} <small style="color:var(--text-secondary);">(${i.version})</small></span>
+            <span style="font-weight:bold; color:var(--accent-blue);">${i.action}</span>
+            <span style="color:var(--text-secondary);">${i.modern_alternative}</span>
         </div>
     `).join('');
 
-    // Migration Steps
+    // SRE Recommendations V2.1 (Vulnerabilidades)
     const stepsUl = document.getElementById('migration-steps');
-    stepsUl.innerHTML = data.steps.map(s => `
+    stepsUl.innerHTML = data.sre_analysis.critical_vulnerabilities.map(v => `
         <li style="margin-bottom:0.8rem; display:flex; gap:10px;">
-            <div style="width:20px; height:20px; border-radius:50%; background:var(--accent-blue); flex-shrink:0;"></div>
-            <span>${s}</span>
+            <div style="width:10px; height:10px; border-radius:50%; background:var(--risk-high); flex-shrink:0; margin-top:5px;"></div>
+            <span>${v}</span>
         </li>
     `).join('');
 
-    // IaC & Config Section
-    document.getElementById('iac-code').innerText = data.terraform;
-    document.getElementById('nginx-code').innerText = data.nginx;
+    // IaC & Config Section V2.1
+    document.getElementById('iac-code').innerText = data.deployment_artifacts.terraform_snippet + "\n\n" + data.deployment_artifacts.k8s_manifest;
+    document.getElementById('nginx-code').innerText = data.deployment_artifacts.nginx_config;
 
-    // Mermaid Diagram
+    // Mermaid Diagram V2.1 (Dynamic from JSON)
     const mermaidContainer = document.getElementById('mermaid-container');
     mermaidContainer.removeAttribute('data-processed');
-    mermaidContainer.innerHTML = data.mermaid;
+    mermaidContainer.innerHTML = data.target_architecture.mermaid_graph;
     mermaid.init(undefined, mermaidContainer);
 
     // Persistir análisis
