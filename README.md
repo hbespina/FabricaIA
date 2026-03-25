@@ -4,7 +4,12 @@ Este portal permite automatizar el descubrimiento y diseño de estrategias de mo
 
 ## Cómo Ejecutar la Fábrica (V3.0)
 
-### Opción 1: Inicio Rápido (Windows)
+### Opción 1: Docker (Recomendado - Microservicios) 🐳
+1. Abre una terminal en la carpeta `Fabrica`.
+2. Ejecuta: `docker-compose up --build`.
+3. Accede al Dashboard en `http://localhost`. El Backend estará en `http://localhost:8000`.
+
+### Opción 2: Inicio Rápido (Windows - Sin Docker)
 1. Abre la carpeta `Fabrica` en el explorador.
 2. Haz doble clic en `run_factory.bat`. Este script instalará dependencias, iniciará el backend de Bedrock y abrirá el Dashboard.
 3. Asegúrate de configurar tus credenciales en `server/.env`.
