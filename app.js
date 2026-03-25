@@ -4,50 +4,75 @@ async function analyzeData() {
     const rawData = document.getElementById('raw-input').value;
     if (!rawData) return alert('Por favor, pega los datos del colector.');
 
-    // Simulación de procesamiento de motor IA
-    // En una implementación real, esto iría a una API de LLM
     const resultsDiv = document.getElementById('results');
     resultsDiv.style.display = 'block';
 
-    // Mock Data basado en el análisis previo de RHEL 4
+    // Motor de Detección Heurística V2.2
+    const hasOracle = rawData.toLowerCase().includes('oracle');
+    const hasJava = rawData.toLowerCase().includes('java');
+    const hasTomcat = rawData.toLowerCase().includes('tomcat');
+    const isRHEL4 = rawData.includes('release 4');
+    
+    // Extracción de Hostname (ejemplo básico)
+    const hostnameMatch = rawData.match(/hostname[=\s]+([^\s\n]+)/i) || ["", "Unknown-Host"];
+    const hostname = hostnameMatch[1];
+
     const analysis = {
         sre_analysis: {
-            risk_score: 9,
-            complexity_score: 8,
-            readiness_level: "Baja",
-            critical_vulnerabilities: ["SSL/TLS v1.0", "Glibc Stack Overflow (Legacy)", "Unsupported Kernel 2.6"]
+            risk_score: isRHEL4 ? 9 : 5,
+            complexity_score: hasJava && isRHEL4 ? 8 : 4,
+            readiness_level: isRHEL4 ? "Crítica" : "Media",
+            critical_vulnerabilities: []
         },
         financial_impact: {
-            migration_effort_hours: 480,
-            estimated_migration_cost_usd: 15000,
-            projected_cloud_monthly_usd: 1250,
+            migration_effort_hours: isRHEL4 ? 480 : 120,
+            estimated_migration_cost_usd: isRHEL4 ? 15000 : 5000,
+            projected_cloud_monthly_usd: 1200,
             savings_vs_onprem_pct: 35,
-            payback_months: 12,
-            cost_of_inaction_annual: 85000
+            payback_months: isRHEL4 ? 12 : 6,
+            cost_of_inaction_annual: isRHEL4 ? 85000 : 25000
         },
         target_architecture: {
             provider: "AWS",
             compute: "Amazon EKS",
-            database_path: ["N/A (Capa de Aplicación Pura)"],
-            mermaid_graph: `graph TD
-    A[NGINX Ingress] --> B[EKS Pods: Tomcat 1.4]
-    style B fill:#3a7bd5,stroke:#fff,color:#fff`
+            database_path: hasOracle ? ["Oracle 8 (Legacy)", "RDS Custom (Oracle 19c)"] : ["N/A (Capa de Aplicación Pura)"],
+            mermaid_graph: ""
         },
-        inventory_analytics: [
-            { item: "JDK", version: "1.4.2_06", action: "Refactor", modern_alternative: "OpenJDK 17" },
-            { item: "Apache Axis", version: "1.3", action: "Replace", modern_alternative: "Spring Web Services" }
-        ],
+        inventory_analytics: [],
         deployment_artifacts: {
-            terraform_snippet: `resource "aws_eks_cluster" "v2_1" {\n  name = "modernization-v2-1"\n}`,
-            nginx_config: `server {\n    listen 80;\n    # Sticky session for Legacy\n    proxy_cookie_path / "/; HTTPOnly; Secure";\n}`,
-            k8s_manifest: `apiVersion: v1\nkind: Pod\nmetadata:\n  name: legacy-app`
+            terraform_snippet: `resource "aws_eks_cluster" "factory" {\n  name = "modernization-${hostname}"\n}`,
+            nginx_config: `server {\n    listen 80;\n    # Sticky sessions para ${hostname}\n    proxy_cookie_path / "/; HTTPOnly; Secure";\n}`,
+            k8s_manifest: `apiVersion: v1\nkind: Deployment\nmetadata:\n  name: ${hostname.toLowerCase()}`
         },
-        system: { // Legacy fallback
-            hostname: "g100603sv446.cencosud.corp",
-            os: "RHEL 4 (Update 6)",
-            stack: ["Java 1.4", "Tomcat", "Axis"]
+        system: {
+            hostname: hostname,
+            os: isRHEL4 ? "RHEL 4 (Legacy)" : "Modern OS",
+            stack: []
         }
     };
+
+    // Construcción dinámica basada en detecciones
+    if (isRHEL4) {
+        analysis.sre_analysis.critical_vulnerabilities.push("Kernel 2.6 es incompatible con kernels modernos (6.x)");
+        analysis.sre_analysis.critical_vulnerabilities.push("Falta de parches de seguridad (End of Life)");
+    }
+    if (hasJava) {
+        analysis.system.stack.push("Java Detected");
+        analysis.inventory_analytics.push({ item: "JDK Runtime", version: "Legacy", action: "Refactor", modern_alternative: "OpenJDK 17" });
+    }
+    if (hasTomcat) {
+        analysis.system.stack.push("Tomcat");
+        analysis.inventory_analytics.push({ item: "Tomcat Instance", version: "EOL", action: "Rehost/Refactor", modern_alternative: "Tomcat 10+" });
+    }
+    if (hasOracle) {
+        analysis.system.stack.push("Oracle DB");
+        analysis.inventory_analytics.push({ item: "Oracle Database", version: "Legacy", action: "Rehost", modern_alternative: "RDS Custom" });
+    }
+
+    // Generar Diagrama Mermaid Dinámico
+    let mGraph = `graph TD\n    A[Internet] --> B[NGINX Ingress]\n    B --> C[Pod: ${hostname}]`;
+    if (hasOracle) mGraph += `\n    C --> D[(RDS Custom: Oracle 19c)]`;
+    analysis.target_architecture.mermaid_graph = mGraph;
 
     renderResults(analysis);
 }
