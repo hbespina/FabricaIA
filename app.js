@@ -28,17 +28,14 @@ async function analyzeData() {
         target_architecture: {
             provider: "AWS",
             compute: "Amazon EKS",
-            database_path: ["Oracle 8 (Legacy)", "RDS Custom (Oracle 19c)", "Aurora PostgreSQL"],
+            database_path: ["N/A (Capa de Aplicación Pura)"],
             mermaid_graph: `graph TD
     A[NGINX Ingress] --> B[EKS Pods: Tomcat 1.4]
-    B --> C[(RDS Custom: Oracle 19c)]
-    style B fill:#3a7bd5,stroke:#fff,color:#fff
-    style C fill:#9d50bb,stroke:#fff,color:#fff`
+    style B fill:#3a7bd5,stroke:#fff,color:#fff`
         },
         inventory_analytics: [
             { item: "JDK", version: "1.4.2_06", action: "Refactor", modern_alternative: "OpenJDK 17" },
-            { item: "Apache Axis", version: "1.3", action: "Replace", modern_alternative: "Spring Web Services" },
-            { item: "Oracle DB", version: "8.1.7", action: "Rehost", modern_alternative: "RDS Custom 19c" }
+            { item: "Apache Axis", version: "1.3", action: "Replace", modern_alternative: "Spring Web Services" }
         ],
         deployment_artifacts: {
             terraform_snippet: `resource "aws_eks_cluster" "v2_1" {\n  name = "modernization-v2-1"\n}`,
