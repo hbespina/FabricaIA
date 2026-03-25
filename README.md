@@ -2,6 +2,17 @@
 
 Este portal permite automatizar el descubrimiento y diseño de estrategias de modernización para sistemas legacy (RHEL, Solaris, AIX).
 
+## Cómo Ejecutar la Fábrica (V3.0)
+
+### Opción 1: Inicio Rápido (Windows)
+1. Abre la carpeta `Fabrica` en el explorador.
+2. Haz doble clic en `run_factory.bat`. Este script instalará dependencias, iniciará el backend de Bedrock y abrirá el Dashboard.
+3. Asegúrate de configurar tus credenciales en `server/.env`.
+
+### Opción 2: Manual
+1. **Backend**: `cd server && pip install -r requirements.txt && python main.py`
+2. **Frontend**: Abre `index.html` en cualquier navegador moderno.
+
 ## Componentes y Versiones
 
 ### V2.0 - SRE & Financial Edition [NUEVO]
