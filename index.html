@@ -33,7 +33,12 @@
                     <h1>Modernization Engine</h1>
                     <p style="color: var(--text-secondary);">Analizador de Sistemas Legacy Cloud-Native</p>
                 </div>
-                <div class="status-badge">Engine Ready</div>
+                <div style="display:flex; gap:10px; align-items:center;">
+                    <button class="primary" style="margin-top:0; padding:0.6rem 1.2rem; background:rgba(255,255,255,0.1); border:1px solid var(--glass-border);" onclick="window.print()">
+                        📄 Exportar Reporte
+                    </button>
+                    <div class="status-badge">Engine V2.0 Ready</div>
+                </div>
             </header>
 
             <!-- Input Area -->
@@ -127,6 +132,21 @@
                 </div>
             </div>
         </main>
+
+        <!-- SRE Chat Assistant [NEW] -->
+        <div id="sre-chat-bubble" onclick="toggleChat()">
+            🤖
+        </div>
+        <div id="chat-window" class="glass-card">
+            <div class="chat-header">SRE AI Assistant</div>
+            <div id="chat-messages">
+                <div class="msg bot">Bot: Hola, soy tu asistente SRE. ¿En qué puedo ayudarte con esta modernización?</div>
+            </div>
+            <div class="chat-input-area">
+                <input type="text" id="user-msg" placeholder="Pregunta algo...">
+                <button onclick="sendMessage()">➤</button>
+            </div>
+        </div>
     </div>
 
     <script src="app.js"></script>

@@ -110,4 +110,52 @@ function renderResults(data) {
     mermaidContainer.removeAttribute('data-processed');
     mermaidContainer.innerHTML = data.mermaid;
     mermaid.init(undefined, mermaidContainer);
+
+    // Persistir análisis
+    saveAnalysis(data);
+}
+
+// Persistencia Local [NEW G]
+function saveAnalysis(data) {
+    localStorage.setItem('latest_analysis', JSON.stringify(data));
+}
+
+// Chat Assistant Logic [NEW G]
+function toggleChat() {
+    const win = document.getElementById('chat-window');
+    win.style.display = win.style.display === 'flex' ? 'none' : 'flex';
+}
+
+function sendMessage() {
+    const input = document.getElementById('user-msg');
+    const text = input.value.trim();
+    if (!text) return;
+
+    addMessage(text, 'user');
+    input.value = '';
+
+    // Respuestas SRE simuladas
+    setTimeout(() => {
+        let reply = "Como experto SRE, te sugiero revisar las dependencias de red en el puerto 8101 antes del cut-over.";
+        if (text.toLowerCase().includes('costo')) reply = "El costo OPEX estimado es conservador; considera un 10% adicional por transferencia de datos (Egress).";
+        if (text.toLowerCase().includes('riesgo')) reply = "El mayor riesgo es el Kernel gap (2.6 vs 6.x). Recomiendo usar contenedores con syscall interception.";
+        addMessage(reply, 'bot');
+    }, 1000);
+}
+
+function addMessage(text, side) {
+    const msgDiv = document.createElement('div');
+    msgDiv.className = `msg ${side}`;
+    msgDiv.innerText = text;
+    document.getElementById('chat-messages').appendChild(msgDiv);
+    msgDiv.scrollIntoView();
+}
+
+// Cargar último análisis si existe
+window.onload = () => {
+    const saved = localStorage.getItem('latest_analysis');
+    if (saved) {
+        console.log("Cargando análisis previo...");
+        // Podríamos auto-renderizar aquí si quisiéramos
+    }
 }
