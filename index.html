@@ -187,7 +187,7 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
       <span id="user-badge" style="color:var(--blue)">—</span>
       <button onclick="logout()" style="background:none;border:none;color:var(--t2);cursor:pointer;font-size:.68rem">Salir</button>
     </div>
-    <div class="ver">ENGINE V4 UNIVERSAL<br>JWT · PDF · Chat · Jira</div>
+    <div class="ver">ENGINE V5 UNIVERSAL<br>RAG · Agentes · Diff · Portfolio</div>
   </div>
 </aside>
 <main>
@@ -197,6 +197,7 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
     <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
       <button class="expbtn" onclick="downloadPdf()" id="pdf-btn">📥 PDF</button>
       <button class="expbtn" onclick="exportReport()">🖨 Imprimir</button>
+      <button class="expbtn" onclick="forceReanalyze()" id="reanalyze-btn" style="display:none" title="Ignorar caché y generar nuevo análisis con IA">🔄 Re-analizar</button>
       <button class="expbtn" onclick="openJiraModal()" id="jira-btn" style="display:none">🎫 Jira</button>
       <div class="badge">Universal V4</div>
     </div>
@@ -454,6 +455,28 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
           </tr>
         </thead>
         <tbody id="dash-recent"></tbody>
+      </table>
+    </div>
+    <!-- Portfolio Multi-Servidor -->
+    <div class="card pt" id="portfolio-box">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem;margin-bottom:.8rem">
+        <h3 style="font-size:.95rem">🗺 Portfolio de Servidores</h3>
+        <button class="bsm" onclick="loadPortfolio()" style="background:rgba(157,80,187,.2);border-color:var(--purple);color:var(--purple)">↺ Actualizar</button>
+      </div>
+      <div id="portfolio-summary" style="display:flex;gap:1.2rem;margin-bottom:.8rem;flex-wrap:wrap"></div>
+      <table style="width:100%;font-size:.76rem;border-collapse:collapse" id="portfolio-table">
+        <thead>
+          <tr style="border-bottom:1px solid var(--bdr)">
+            <th style="text-align:left;padding:.4rem;color:var(--t2)">Servidor</th>
+            <th style="text-align:center;padding:.4rem;color:var(--t2)">Acoplamiento</th>
+            <th style="text-align:center;padding:.4rem;color:var(--t2)">Riesgo</th>
+            <th style="text-align:left;padding:.4rem;color:var(--t2)">Estrategia</th>
+            <th style="text-align:center;padding:.4rem;color:var(--t2)">Scans</th>
+            <th style="text-align:center;padding:.4rem;color:var(--t2)">Último</th>
+            <th style="text-align:center;padding:.4rem;color:var(--t2)">Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="portfolio-body"><tr><td colspan="7" style="text-align:center;padding:1rem;color:var(--t2)">Cargando...</td></tr></tbody>
       </table>
     </div>
   </div>

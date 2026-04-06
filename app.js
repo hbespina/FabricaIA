@@ -226,31 +226,57 @@ function _mSafe(s) {
     return (s || '').replace(/["\[\]{}()]/g, '').replace(/[^\w\s\-.\/]/g, ' ').trim().slice(0, 42);
 }
 
-// ─── AS-IS Diagram Builder ────────────────────────────────────────────────────
+// ─── AS-IS Diagram — Acoplamiento y Dependencias de Runtime ──────────────────
+//
+// Taxonomía de nodos (containerization readiness):
+//   osblock   = Rojo  — dependencia directa del OS (kernel, rutas fijas, hardware)
+//   stateful  = Amarillo — software con estado que requiere rediseño cloud-native
+//   cloudready= Verde  — proceso independiente, puede ir a Docker de inmediato
+//   intnode   = Naranja — integrador (ESB/ETL/API gateway), siempre stateful
+//
+// Taxonomía de conexiones:
+//   ==>              Acoplamiento CRÍTICO  (sync, IPC, IP hardcoded, .so/.dll)
+//   -->|"💾 /ruta"|  PERSISTENCIA         (escribe en disco local del servidor)
+//   -.->             Acoplamiento DÉBIL    (async, cola, telemetría)
+//
 function _buildAsisMermaid(techs, findings, host) {
     let idx = 0;
     const mkId = () => 'N' + (idx++);
-    const seen      = new Set();   // exact key dedup
-    const seenWords = new Set();   // word-level dedup ("oracle" covers "Oracle DB" + "Oracle Database")
+    const seen      = new Set();
+    const seenWords = new Set();
 
     const addWords = label =>
         label.toLowerCase().split(/[\s/\-_]+/)
-            .filter(w => w.length > 3)
-            .forEach(w => seenWords.add(w));
-
+            .filter(w => w.length > 3).forEach(w => seenWords.add(w));
     const wordsDupOf = label =>
         label.toLowerCase().split(/[\s/\-_]+/)
-            .filter(w => w.length > 3)
-            .some(w => seenWords.has(w));
+            .filter(w => w.length > 3).some(w => seenWords.has(w));
 
-    // ── 1. Inventario unificado por capa ─────────────────────────────────────
+    // ── 1. Clasificación de containerization readiness ───────────────────────
+    const _readiness = node => {
+        const cat = node.cat || '';
+        const sev = node.sev || '';
+        // Integradores siempre tienen estado propio (ESB, ETL, ODI, NiFi)
+        if (['Integration'].includes(cat)) return 'intnode';
+        // OS-blocked: app servers viejos y runtimes críticos con .so/.dll nativos
+        if (['AppServer'].includes(cat)) return 'osblock';
+        if (cat === 'Runtime' && sev === 'CRITICO') return 'osblock';
+        // Stateful: todo lo que persiste estado — BDs, caches, brokers
+        if (['Database','Search','Cache','Messaging'].includes(cat)) return 'stateful';
+        // Cloud-ready: agentes de monitoreo, proxies web sin estado, herramientas SCM
+        if (['Monitoring','External','SCM','UX/UI'].includes(cat)) return 'cloudready';
+        if (cat === 'Web') return 'cloudready';
+        // Default: app sin clasificar explícita
+        return 'modnode';
+    };
+
+    // ── 2. Inventario por capa ────────────────────────────────────────────────
     const byLayer = { web:[], app:[], db:[], cache:[], msg:[], int:[], ext:[] };
 
     (techs || []).forEach(t => {
         const key = (t.n || '').toLowerCase();
         if (seen.has(key) || !t.n) return;
-        seen.add(key);
-        addWords(t.n);
+        seen.add(key); addWords(t.n);
         const layer = _CAT_LAYER[t.cat] || 'app';
         if (byLayer[layer]) byLayer[layer].push({ id: mkId(), label: t.n, cat: t.cat, sev: null });
     });
@@ -260,152 +286,171 @@ function _buildAsisMermaid(techs, findings, host) {
         const name = (f.title || '').split(/\s[—(]/)[0].trim();
         const key  = name.toLowerCase();
         if (seen.has(key) || !name || wordsDupOf(name)) return;
-        seen.add(key);
-        addWords(name);
+        seen.add(key); addWords(name);
         const layer = _CAT_LAYER[f.cat] || 'app';
         if (byLayer[layer]) byLayer[layer].push({ id: mkId(), label: name, cat: f.cat, sev: f.sev });
     });
 
     const allNodes = Object.values(byLayer).flat();
-    if (allNodes.length === 0) {
+    if (allNodes.length === 0)
         return 'graph LR\n    USR(["👤 Usuarios"]) --> APP["Aplicacion Legacy"] --> DB[("Base de Datos")]';
-    }
 
-    // ── 2. Detectar vampiros ─────────────────────────────────────────────────
-    // Un nodo es vampiro si: es DB con ≥2 apps conectándose, o Integration con ≥2 apps
-    const vampireIds = new Set();
-    const appCount = byLayer.app.length;
-    if (appCount >= 2) {
-        byLayer.db.forEach(n => vampireIds.add(n.id));
-        byLayer.int.forEach(n => vampireIds.add(n.id));
-    } else if (byLayer.db.length === 1 && byLayer.int.length >= 1) {
-        byLayer.db.forEach(n => vampireIds.add(n.id));
-    }
-    // Nodo de integración siempre es vampiro si hay ≥1 app
-    if (appCount >= 1 && byLayer.int.length >= 1) {
-        byLayer.int.forEach(n => vampireIds.add(n.id));
-    }
+    // ── 3. Mermaid header + classDefs ────────────────────────────────────────
+    const lns = ['graph TB', ''];
 
-    // ── 3. Construir Mermaid ─────────────────────────────────────────────────
-    const lns = ['graph TB'];
-    lns.push('');
-    lns.push('    classDef appserv  fill:#1a2a4a,stroke:#3498db,color:#90cdf4');
-    lns.push('    classDef dbnode   fill:#0d2b4a,stroke:#2980b9,color:#90cdf4');
-    lns.push('    classDef cachnode fill:#1a3a2a,stroke:#27ae60,color:#9ae6b4');
-    lns.push('    classDef msgnode  fill:#2a1a4a,stroke:#8e44ad,color:#d6bcfa');
-    lns.push('    classDef intnode  fill:#3d2000,stroke:#e67e22,color:#fbd38d');
-    lns.push('    classDef webnode  fill:#1a1a3d,stroke:#6c63ff,color:#c3b1e1');
-    lns.push('    classDef extnode  fill:#1a2a1a,stroke:#718096,color:#a0aec0');
-    lns.push('    classDef vampire  fill:#8B0000,stroke:#FF0000,color:#fff,stroke-width:3px');
+    // Readiness
+    lns.push('    classDef osblock   fill:#4a0000,stroke:#ff4444,color:#ffaaaa,stroke-width:2px');
+    lns.push('    classDef stateful  fill:#3d2e00,stroke:#ffd700,color:#ffe066,stroke-width:2px');
+    lns.push('    classDef cloudready fill:#003d1a,stroke:#4ade80,color:#9ae6b4');
+    lns.push('    classDef intnode   fill:#3d2000,stroke:#fb923c,color:#fbd38d,stroke-width:2px');
+    lns.push('    classDef modnode   fill:#1a2a4a,stroke:#3498db,color:#90cdf4');
     lns.push('');
 
-    lns.push('    USR(["👤 Usuarios"])');
+    // ── 4. Nodo usuario ───────────────────────────────────────────────────────
+    lns.push('    USR(["👤 Usuarios / Clientes"]):::cloudready');
     lns.push('');
 
-    // Subgraph servidor
+    // ── 5. Subgraph servidor físico ───────────────────────────────────────────
     const srvLabel = host ? host.split('.')[0].toUpperCase() : 'SERVIDOR';
-    lns.push(`    subgraph SRV["🖥️ ${_mSafe(srvLabel)} — AS-IS"]`);
+    lns.push(`    subgraph SRV["🖥️ ${_mSafe(srvLabel)} — AS-IS | Inventario Runtime"]`);
     lns.push('    direction TB');
 
-    const emitNode = n => {
-        const isV = vampireIds.has(n.id);
-        const cls = _nodeClass(n.cat, isV);
-        const ico = n.sev === 'CRITICO' ? '⚠ ' : (n.sev === 'ALTO' ? '▲ ' : '');
-        const lbl = _mSafe(ico + n.label);
-        if (['Database','Search','Cache'].includes(n.cat)) {
-            lns.push(`        ${n.id}[("${lbl}")]${cls}`);
-        } else {
-            lns.push(`        ${n.id}["${lbl}"]${cls}`);
-        }
+    // Sub-subgraph de integradores si existen
+    const hasInt = byLayer.int.length > 0;
+    if (hasInt) {
+        lns.push('');
+        lns.push('        subgraph ESB["🔗 Capa Integradores — ESB / ETL / API"]');
+        byLayer.int.forEach(n => {
+            const lbl = _mSafe('🔗 ' + n.label);
+            lns.push(`            ${n.id}["${lbl}"]:::intnode`);
+        });
+        lns.push('        end');
+    }
+
+    // Capas web y app
+    const emitNode = (n, indent = '        ') => {
+        const cls  = _readiness(n);
+        const ico  = n.sev === 'CRITICO' ? '⛔ ' : (n.sev === 'ALTO' ? '⚠ ' : '');
+        const lbl  = _mSafe(ico + n.label);
+        if (['Database','Search','Cache'].includes(n.cat))
+            lns.push(`${indent}${n.id}[("${lbl}")]:::${cls}`);
+        else
+            lns.push(`${indent}${n.id}["${lbl}"]:::${cls}`);
     };
 
-    [...byLayer.web, ...byLayer.app, ...byLayer.db, ...byLayer.cache,
-     ...byLayer.msg, ...byLayer.int].forEach(emitNode);
+    [...byLayer.web, ...byLayer.app, ...byLayer.cache, ...byLayer.msg]
+        .forEach(n => emitNode(n));
+
+    // Sub-subgraph de datos (DB + archivos locales)
+    if (byLayer.db.length > 0) {
+        lns.push('');
+        lns.push('        subgraph DATA["🗄 Capa Datos — Stateful"]');
+        byLayer.db.forEach(n => emitNode(n, '            '));
+        lns.push('        end');
+    }
 
     lns.push('    end');
 
-    // Subgraph externo (agents, backup, SCM)
+    // ── 6. Subgraph externo ───────────────────────────────────────────────────
     if (byLayer.ext.length > 0) {
         lns.push('');
-        lns.push('    subgraph EXT["☁️ Externos / Gestión"]');
-        byLayer.ext.forEach(emitNode);
+        lns.push('    subgraph EXT["☁️ Externos / Observabilidad"]');
+        byLayer.ext.forEach(n => emitNode(n, '        '));
         lns.push('    end');
     }
     lns.push('');
 
-    // ── 4. Conexiones ─────────────────────────────────────────────────────────
-    // Emitir críticas primero, secundarias después → permite linkStyle por índice
-    const critLinks = [];
-    const secLinks  = [];
+    // ── 7. Conexiones por tipo de acoplamiento ────────────────────────────────
+    // Orden de emisión: críticas → persistencia → débiles  (para linkStyle por índice)
+    const critLinks = [];   // ==>  rojo  — acoplamiento crítico
+    const persLinks = [];   // -->  amarillo — escritura en disco local
+    const weakLinks = [];   // -.-> verde  — async / telemetría
 
-    const apps  = byLayer.app;
-    const webs  = byLayer.web;
-    const dbs   = byLayer.db;
-    const caches= byLayer.cache;
-    const msgs  = byLayer.msg;
-    const ints  = byLayer.int;
-    const exts  = byLayer.ext;
+    const { web: webs, app: apps, db: dbs, cache: caches, msg: msgs, int: ints, ext: exts } = byLayer;
 
-    // USR → Web → App  (crítico)
+    // USR → Web (proxy reverso — acoplamiento crítico vía IP/puerto)
     if (webs.length > 0) {
-        webs.forEach(w => critLinks.push(`    USR ==> ${w.id}`));
-        webs.forEach(w => apps.forEach(a => critLinks.push(`    ${w.id} ==>|"proxy"| ${a.id}`)));
-    } else {
-        apps.forEach(a => critLinks.push(`    USR ==> ${a.id}`));
+        webs.forEach(w => critLinks.push(`    USR ==>|"HTTPS"| ${w.id}`));
+        webs.forEach(w => apps.forEach(a => critLinks.push(`    ${w.id} ==>|"proxy_pass IPC"| ${a.id}`)));
+    } else if (apps.length > 0) {
+        apps.forEach(a => critLinks.push(`    USR ==>|"TCP directo"| ${a.id}`));
     }
 
-    // App → DB  (crítico: SQL directo)
-    apps.forEach(a => dbs.forEach(d =>
-        critLinks.push(`    ${a.id} ==>|"SQL directo"| ${d.id}`)
-    ));
-
-    // App → Integración  (crítico: si falla el bus, la app se cae)
+    // App → Integrador (sync: si el ESB cae, la app cae — acoplamiento crítico)
     apps.forEach(a => ints.forEach(i =>
-        critLinks.push(`    ${a.id} ==>|"integración"| ${i.id}`)
+        critLinks.push(`    ${a.id} ==>|"sync ESB call"| ${i.id}`)
     ));
 
-    // Integración → DB  (crítico: ESB escribe en DB)
+    // Integrador → DB (sync: ESB orquesta DB — acoplamiento crítico)
     ints.forEach(i => dbs.forEach(d =>
-        critLinks.push(`    ${i.id} ==>|"write DB"| ${d.id}`)
+        critLinks.push(`    ${i.id} ==>|"JDBC sync"| ${d.id}`)
     ));
 
-    // App → Cache  (secundario: miss-safe)
+    // App → DB directa (SQL síncrono — acoplamiento crítico)
+    if (ints.length === 0) {
+        apps.forEach(a => dbs.forEach(d =>
+            critLinks.push(`    ${a.id} ==>|"SQL directo"| ${d.id}`)
+        ));
+    }
+
+    // DB escribe en disco local (persistencia — bloqueo para containers)
+    dbs.forEach(d =>
+        persLinks.push(`    ${d.id} -->|"💾 /var/data"| ${d.id}_disk[/"📁 Datos locales"/]:::osblock`)
+    );
+
+    // App/ESB escribe logs en disco local
+    if (apps.length > 0) {
+        persLinks.push(`    ${apps[0].id} -->|"💾 /var/log"| LOG[/"📄 Logs locales"/]:::osblock`);
+    }
+    if (ints.length > 0) {
+        persLinks.push(`    ${ints[0].id} -->|"💾 /opt/osb/logs"| INTLOG[/"📄 OSB Logs"/]:::osblock`);
+    }
+
+    // App → Cache (miss-safe — acoplamiento débil)
     apps.forEach(a => caches.forEach(c =>
-        secLinks.push(`    ${a.id} -.->|"cache"| ${c.id}`)
+        weakLinks.push(`    ${a.id} -.->|"cache lookup"| ${c.id}`)
     ));
 
-    // App/Int → Messaging  (secundario: async)
-    [...apps, ...ints].forEach(a => msgs.forEach(m =>
-        secLinks.push(`    ${a.id} -.->|"eventos"| ${m.id}`)
+    // App/Int → Messaging (async — acoplamiento débil)
+    [...apps, ...ints].forEach(n => msgs.forEach(m =>
+        weakLinks.push(`    ${n.id} -.->|"async event"| ${m.id}`)
     ));
 
-    // Messaging → Integración  (secundario: async consume)
+    // Messaging → Integrador (consume async)
     msgs.forEach(m => ints.forEach(i =>
-        secLinks.push(`    ${m.id} -.->|"consume"| ${i.id}`)
+        weakLinks.push(`    ${m.id} -.->|"consume"| ${i.id}`)
     ));
 
-    // App → Externo  (secundario: heartbeat / backup)
+    // Cualquier nodo → Externo (telemetría / heartbeat — acoplamiento débil)
     if (exts.length > 0) {
-        const anchor = apps[0] || webs[0] || dbs[0];
+        const anchor = apps[0] || webs[0] || ints[0];
         if (anchor) exts.forEach(e =>
-            secLinks.push(`    ${anchor.id} -.->|"telemetría"| ${e.id}`)
+            weakLinks.push(`    ${anchor.id} -.->|"telemetría"| ${e.id}`)
         );
     }
 
     critLinks.forEach(l => lns.push(l));
     lns.push('');
-    secLinks.forEach(l => lns.push(l));
+    persLinks.forEach(l => lns.push(l));
+    lns.push('');
+    weakLinks.forEach(l => lns.push(l));
 
-    // ── 5. linkStyle: rojo para críticos, verde-punteado para secundarios ─────
-    const nCrit = critLinks.length;
-    const nSec  = secLinks.length;
-    if (nCrit > 0) {
-        const idxs = Array.from({ length: nCrit }, (_, i) => i).join(',');
-        lns.push(`    linkStyle ${idxs} stroke:#ff3333,stroke-width:2.5px`);
+    // ── 8. linkStyle por tipo ─────────────────────────────────────────────────
+    const nC = critLinks.length;
+    const nP = persLinks.length;
+    const nW = weakLinks.length;
+
+    if (nC > 0) {
+        const idxs = Array.from({ length: nC }, (_, i) => i).join(',');
+        lns.push(`    linkStyle ${idxs} stroke:#ff3333,stroke-width:3px`);
     }
-    if (nSec > 0) {
-        const idxs = Array.from({ length: nSec }, (_, i) => nCrit + i).join(',');
-        lns.push(`    linkStyle ${idxs} stroke:#4ade80,stroke-width:1px,stroke-dasharray:5`);
+    if (nP > 0) {
+        const idxs = Array.from({ length: nP }, (_, i) => nC + i).join(',');
+        lns.push(`    linkStyle ${idxs} stroke:#ffd700,stroke-width:1.5px,stroke-dasharray:3`);
+    }
+    if (nW > 0) {
+        const idxs = Array.from({ length: nW }, (_, i) => nC + nP + i).join(',');
+        lns.push(`    linkStyle ${idxs} stroke:#4ade80,stroke-width:1px,stroke-dasharray:6`);
     }
 
     return lns.join('\n');
@@ -491,6 +536,294 @@ function _buildTobeMermaid(techs) {
     return lns.join('\n');
 }
 
+// ─── IaC Local Generators ─────────────────────────────────────────────────────
+function _buildTerraform(techs, host) {
+    const by = {};
+    (techs || []).forEach(t => { (by[t.cat] = by[t.cat] || []).push(t); });
+    const region = 'us-east-1';
+    const safeName = (host || 'app').replace(/[^a-z0-9]/gi, '-').toLowerCase().slice(0, 20);
+    const dbEngine = (by['Database'] || [])[0]?.a?.toLowerCase().includes('oracle') ? 'oracle-ee' :
+                     (by['Database'] || [])[0]?.a?.toLowerCase().includes('mysql')  ? 'mysql'     :
+                     (by['Database'] || [])[0]?.a?.toLowerCase().includes('postgre') ? 'postgres'  : 'aurora-mysql';
+    const hasCache  = (by['Cache']     || []).length > 0;
+    const hasQueue  = (by['Messaging'] || []).length > 0;
+
+    return `# Terraform — ${host || 'Modernization Target'}
+# Generado por Modernization Factory
+
+terraform {
+  required_version = ">= 1.6"
+  required_providers {
+    aws = { source = "hashicorp/aws", version = "~> 5.0" }
+  }
+}
+
+provider "aws" { region = "${region}" }
+
+# ── VPC ──────────────────────────────────────────────────────────────
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "~> 5.0"
+  name    = "${safeName}-vpc"
+  cidr    = "10.0.0.0/16"
+  azs             = ["${region}a", "${region}b"]
+  private_subnets = ["10.0.1.0/24", "10.0.2.0/24"]
+  public_subnets  = ["10.0.101.0/24", "10.0.102.0/24"]
+  enable_nat_gateway = true
+}
+
+# ── ECS Fargate ───────────────────────────────────────────────────────
+resource "aws_ecs_cluster" "${safeName}_cluster" {
+  name = "${safeName}-cluster"
+  setting { name = "containerInsights"; value = "enabled" }
+}
+
+resource "aws_ecs_task_definition" "${safeName}_task" {
+  family                   = "${safeName}"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 1024
+  memory                   = 2048
+  execution_role_arn       = aws_iam_role.ecs_exec.arn
+  container_definitions = jsonencode([{
+    name  = "${safeName}"
+    image = "\${var.ecr_image}"
+    portMappings = [{ containerPort = 8080; protocol = "tcp" }]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options   = {
+        "awslogs-group"  = "/ecs/${safeName}"
+        "awslogs-region" = "${region}"
+        "awslogs-stream-prefix" = "ecs"
+      }
+    }
+  }])
+}
+${(by['Database'] || []).length > 0 ? `
+# ── RDS ──────────────────────────────────────────────────────────────
+resource "aws_db_instance" "${safeName}_db" {
+  identifier        = "${safeName}-db"
+  engine            = "${dbEngine}"
+  instance_class    = "db.t3.medium"
+  allocated_storage = 100
+  db_name           = "${safeName.replace(/-/g,'_')}"
+  username          = "dbadmin"
+  password          = var.db_password
+  multi_az          = true
+  skip_final_snapshot = false
+  vpc_security_group_ids = [aws_security_group.db_sg.id]
+  db_subnet_group_name   = aws_db_subnet_group.main.name
+}` : ''}
+${hasCache ? `
+# ── ElastiCache Redis ─────────────────────────────────────────────────
+resource "aws_elasticache_cluster" "${safeName}_cache" {
+  cluster_id        = "${safeName}-cache"
+  engine            = "redis"
+  node_type         = "cache.t3.micro"
+  num_cache_nodes   = 1
+  port              = 6379
+  subnet_group_name = aws_elasticache_subnet_group.main.name
+}` : ''}
+${hasQueue ? `
+# ── Amazon MQ (ActiveMQ) ─────────────────────────────────────────────
+resource "aws_mq_broker" "${safeName}_mq" {
+  broker_name        = "${safeName}-mq"
+  engine_type        = "ActiveMQ"
+  engine_version     = "5.17.6"
+  host_instance_type = "mq.t3.micro"
+  user { username = "mqadmin"; password = var.mq_password }
+}` : ''}
+
+variable "ecr_image"    { type = string }
+variable "db_password"  { type = string; sensitive = true }
+variable "mq_password"  { type = string; sensitive = true; default = "" }
+`;
+}
+
+function _buildK8sYaml(techs, host) {
+    const by = {};
+    (techs || []).forEach(t => { (by[t.cat] = by[t.cat] || []).push(t); });
+    const safeName  = (host || 'app').replace(/[^a-z0-9]/gi, '-').toLowerCase().slice(0, 20);
+    const appVer    = (by['AppServer'] || by['Runtime'] || [{}])[0]?.a || 'app';
+    const replicas  = 2;
+
+    return `# Kubernetes Manifests — ${host || 'Modernization Target'}
+# Generado por Modernization Factory
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${safeName}
+  labels:
+    app.kubernetes.io/name: ${safeName}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${safeName}
+  namespace: ${safeName}
+  labels:
+    app: ${safeName}
+spec:
+  replicas: ${replicas}
+  selector:
+    matchLabels:
+      app: ${safeName}
+  template:
+    metadata:
+      labels:
+        app: ${safeName}
+    spec:
+      containers:
+      - name: ${safeName}
+        image: \${ECR_REPO}/${safeName}:latest
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+          limits:
+            cpu: "1000m"
+            memory: "2Gi"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 20
+        env:
+        - name: DB_URL
+          valueFrom:
+            secretKeyRef:
+              name: ${safeName}-secrets
+              key: db_url
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${safeName}-svc
+  namespace: ${safeName}
+spec:
+  selector:
+    app: ${safeName}
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ${safeName}-hpa
+  namespace: ${safeName}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ${safeName}
+  minReplicas: ${replicas}
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+`;
+}
+
+function _buildDockerfile(techs) {
+    const by = {};
+    (techs || []).forEach(t => { (by[t.cat] = by[t.cat] || []).push(t); });
+    const appServer = (by['AppServer'] || [])[0]?.a || '';
+    const runtime   = (by['Runtime']   || [])[0]?.a || '';
+
+    let baseImg   = 'eclipse-temurin:17-jre-alpine';
+    let buildImg  = 'eclipse-temurin:17-jdk-alpine';
+    let buildCmd  = 'mvn -q package -DskipTests';
+    let artifact  = 'target/*.jar';
+    let runCmd    = 'java -jar /app/app.jar';
+    let port      = 8080;
+
+    if (/node/i.test(runtime)) {
+        baseImg  = 'node:20-alpine';
+        buildImg = 'node:20-alpine';
+        buildCmd = 'npm ci && npm run build';
+        artifact = '.';
+        runCmd   = 'node server.js';
+        port     = 3000;
+    } else if (/python/i.test(runtime)) {
+        baseImg  = 'python:3.12-slim';
+        buildImg = 'python:3.12-slim';
+        buildCmd = 'pip install --no-cache-dir -r requirements.txt';
+        artifact = '.';
+        runCmd   = 'gunicorn -w 4 -b 0.0.0.0:8000 app:app';
+        port     = 8000;
+    } else if (/websphere|was/i.test(appServer)) {
+        baseImg  = 'ibmcom/websphere-traditional:9.0.5';
+        buildImg = 'eclipse-temurin:8-jdk-alpine';
+        runCmd   = '/opt/IBM/WebSphere/AppServer/bin/startServer.sh server1';
+        port     = 9080;
+    } else if (/jboss|wildfly/i.test(appServer)) {
+        baseImg  = 'quay.io/wildfly/wildfly:30.0';
+        buildImg = 'eclipse-temurin:17-jdk-alpine';
+        artifact = 'target/*.war';
+        runCmd   = '/opt/jboss/wildfly/bin/standalone.sh -b 0.0.0.0';
+        port     = 8080;
+    } else if (/tomcat/i.test(appServer)) {
+        baseImg  = 'tomcat:10.1-jre17-alpine';
+        buildImg = 'eclipse-temurin:17-jdk-alpine';
+        artifact = 'target/*.war';
+        runCmd   = 'catalina.sh run';
+        port     = 8080;
+    }
+
+    return `# Dockerfile — Modernization Factory
+# Multi-stage build optimizado
+
+# ── Stage 1: Build ────────────────────────────────────────────────────
+FROM ${buildImg} AS builder
+WORKDIR /build
+COPY . .
+RUN ${buildCmd}
+
+# ── Stage 2: Runtime ─────────────────────────────────────────────────
+FROM ${baseImg}
+WORKDIR /app
+
+# Usuario no-root (seguridad)
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+USER appuser
+
+COPY --from=builder /build/${artifact} /app/
+
+EXPOSE ${port}
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s \\
+  CMD wget -qO- http://localhost:${port}/health || exit 1
+
+CMD ["${runCmd.split(' ')[0]}"${runCmd.split(' ').slice(1).map(a => `, "${a}"`).join('')}]
+`;
+}
+
+function _renderIaC(techs, host) {
+    const aiData = lastAiData || {};
+    const tfEl   = document.getElementById('tf');
+    const k8sEl  = document.getElementById('k8s');
+    const dockEl = document.getElementById('dock');
+    if (tfEl)   tfEl.innerText   = aiData.terraform_code || _buildTerraform(techs, host);
+    if (k8sEl)  k8sEl.innerText  = aiData.k8s_yaml       || _buildK8sYaml(techs, host);
+    if (dockEl) dockEl.innerText = aiData.dockerfile      || _buildDockerfile(techs);
+}
+
 window.triggerMermaid = async function() {
     if (typeof mermaid === 'undefined') return;
 
@@ -565,10 +898,13 @@ window.sw = function(i) {
   if(n) n.classList.add('on');
 
   if(i === 4 && window.fetchHistory) window.fetchHistory();
-  if(i === 5 && window.loadDashboard) window.loadDashboard();
+  if(i === 5 && window.loadDashboard) { window.loadDashboard(); window.loadPortfolio(); }
 
-  if (i === 0 || i === 1) {
+  if (i === 0 || i === 1 || i === 2) {
       setTimeout(() => window.triggerMermaid(), 50);
+  }
+  if (i === 3) {
+      _renderIaC(lastDetectedTechs, lastHost);
   }
 };
 
@@ -783,13 +1119,14 @@ window.connectAndCollect = async function() {
                     const cached = await fetchResp.json();
                     privateKeyStr = '';
 
-                    // Cargar en textarea y mostrar OK
+                    // Cargar en textarea y disparar análisis automáticamente
                     document.getElementById('raw').value = cached.output;
                     if (prog) prog.style.display = 'none';
                     st.style.color = 'var(--green)';
-                    st.innerText = `Inventario cargado (${age} min) — ${cached.output.split('\n').length} líneas`;
+                    st.innerText = `Inventario cargado (${age} min) — analizando...`;
                     btn.disabled = false;
                     btn.innerText = '🔍 Conectar y Analizar';
+                    await window.run();
                     return;
                 }
                 // Si eligió 'new_scan': continuar hacia abajo con scan completo
@@ -974,10 +1311,12 @@ window.analyze = async function() {
         const industry = (document.getElementById('industry-select') || {}).value || 'general';
         setAiStatus('running', '⟳ Iniciando análisis IA...');
 
+        const forceReanalyze = window._forceReanalyze || false;
+        window._forceReanalyze = false;
         const aiResp = await fetch(`${apiUrl}/analyze`, {
             method: 'POST',
             headers: authHeaders({ 'Content-Type': 'application/json' }),
-            body: JSON.stringify({ raw_data: raw, industry })
+            body: JSON.stringify({ raw_data: raw, industry, force_reanalyze: forceReanalyze })
         });
 
         if (!aiResp.ok) throw new Error((await aiResp.json()).detail || 'Error AI');
@@ -1067,25 +1406,26 @@ window.updateAiFields = function(aiData, sh) {
         agentBox.style.display = 'block';
     }
 
-    // ── Arquitectura Actual AS-IS
+    // ── Arquitectura Actual AS-IS — siempre visible (fallback local si IA no retorna campo)
     const currBox  = document.getElementById('current-arch-box');
-    const currArch = aiData?.current_architecture;
-    if (currArch && currBox) {
+    if (currBox) {
+        const currArch   = aiData?.current_architecture;
         const scoreEl    = document.getElementById('coupling-score');
         const analysisEl = document.getElementById('coupling-analysis');
         const painEl     = document.getElementById('pain-points');
-        const diagEl     = document.getElementById('current-arch-diagram');
 
-        const score = currArch.coupling_score || 0;
+        // Score: usar el de la IA o estimar localmente con criticCount
+        const score = currArch?.coupling_score
+            ?? Math.min(10, 3 + (lastFindings.filter(f => f.sev === 'CRITICO').length) * 2);
         const scoreColor = score >= 7 ? 'var(--red)' : score >= 4 ? 'var(--yellow)' : 'var(--green)';
         if (scoreEl) { scoreEl.innerText = score; scoreEl.style.color = scoreColor; }
-        if (analysisEl) analysisEl.innerText = currArch.coupling_analysis || '';
-        if (painEl && currArch.pain_points?.length) {
+        if (analysisEl && currArch?.coupling_analysis) analysisEl.innerText = currArch.coupling_analysis;
+        if (painEl && currArch?.pain_points?.length) {
             painEl.innerHTML = currArch.pain_points.map(p =>
                 `<div style="font-size:.75rem;color:var(--red);padding:.2rem 0">▸ ${p}</div>`
             ).join('');
         }
-        // El diagrama AS-IS se renderiza en triggerMermaid() para control de errores
+        // El diagrama AS-IS se renderiza en triggerMermaid() — visible siempre
         currBox.style.display = 'block';
     }
 
@@ -1133,10 +1473,8 @@ window.updateAiFields = function(aiData, sh) {
         remedBox.style.display = 'block';
     }
 
-    // Code blocks
-    if (document.getElementById('tf')) document.getElementById('tf').innerText = aiData?.terraform_code || 'No disponible';
-    if (document.getElementById('k8s')) document.getElementById('k8s').innerText = aiData?.k8s_yaml || 'No disponible';
-    if (document.getElementById('dock')) document.getElementById('dock').innerText = aiData?.dockerfile || 'No disponible';
+    // Code blocks — generar localmente si IA no los retornó
+    _renderIaC(lastDetectedTechs, lastHost);
 
     // Trigger diagrams if current page needs it
     window.triggerMermaid();
@@ -1303,12 +1641,16 @@ window.fetchHistory = async function() {
         if (cmpResult) cmpResult.style.display = 'none';
 
         b.innerHTML = data.map(i => `<tr>
-            <td><input type="checkbox" class="scan-chk" id="chk-${i.id}" data-id="${i.id}" onchange="toggleScanCheck('${i.id}', this.checked)"></td>
+            <td><input type="checkbox" class="scan-chk" id="chk-${i.id}" data-id="${i.id}" onchange="toggleCompareCheck('${i.id}', this)"></td>
             <td style="font-weight:700">${i.hostname}</td>
             <td style="color:var(--t2);font-size:.72rem">${new Date(i.timestamp).toLocaleString()}</td>
             <td style="color:var(--blue);font-size:.7rem">${i.model_used ? i.model_used.replace('amazon.','').replace('-v1:0','') : '—'}</td>
-            <td><button class="bsm" style="margin-top:0" onclick="loadHistory('${i.id}')">Cargar Blueprint</button></td>
+            <td style="display:flex;gap:.3rem;flex-wrap:wrap">
+              <button class="bsm" style="margin-top:0" onclick="loadHistory('${i.id}')">Cargar</button>
+              <button class="bsm" style="margin-top:0;background:rgba(157,80,187,.2);border-color:var(--purple);color:var(--purple)" onclick="downloadRunbook('${i.id}')">📜</button>
+            </td>
         </tr>`).join('') || '<tr><td colspan="5" style="text-align:center">No hay registros</td></tr>';
+
     } catch(e) { b.innerHTML = '<tr><td colspan="4" style="color:var(--red);text-align:center">Error</td></tr>'; }
 };
 
@@ -1337,15 +1679,25 @@ window.loadHistory = async function(id) {
 // ─── Scan Actions (PDF / Chat / Jira) ────────────────────────────────────────
 function _activateScanActions(scanId, hostname) {
     lastScanId = scanId;
-    const pdfBtn  = document.getElementById('pdf-btn');
-    const jiraBtn = document.getElementById('jira-btn');
-    const fab     = document.getElementById('chat-fab');
-    const label   = document.getElementById('chat-scan-label');
-    if (pdfBtn)  pdfBtn.style.display  = scanId ? 'inline-block' : 'none';
-    if (jiraBtn) jiraBtn.style.display = scanId ? 'inline-block' : 'none';
-    if (fab)     fab.style.display     = scanId ? 'flex' : 'none';
-    if (label)   label.innerText       = scanId ? hostname || scanId.slice(0,8) : 'Sin analisis activo';
+    const pdfBtn       = document.getElementById('pdf-btn');
+    const jiraBtn      = document.getElementById('jira-btn');
+    const reanalyzeBtn = document.getElementById('reanalyze-btn');
+    const fab          = document.getElementById('chat-fab');
+    const label        = document.getElementById('chat-scan-label');
+    if (pdfBtn)       pdfBtn.style.display       = scanId ? 'inline-block' : 'none';
+    if (jiraBtn)      jiraBtn.style.display      = scanId ? 'inline-block' : 'none';
+    if (reanalyzeBtn) reanalyzeBtn.style.display = 'inline-block';  // siempre visible tras análisis
+    if (fab)          fab.style.display          = scanId ? 'flex' : 'none';
+    if (label)        label.innerText            = scanId ? hostname || scanId.slice(0,8) : 'Sin analisis activo';
 }
+
+window.forceReanalyze = async function() {
+    const raw = (document.getElementById('raw') || {}).value || '';
+    if (!raw.trim()) { alert('No hay inventario en memoria. Realice un escaneo primero.'); return; }
+    if (!confirm('¿Generar un análisis nuevo ignorando el caché?\nEsto llamará a la IA y puede tardar 1-2 minutos.')) return;
+    window._forceReanalyze = true;
+    await window.run();
+};
 
 // ─── PDF — Captura de diagrama SVG → PNG base64 ──────────────────────────────
 async function _captureDiagramPng(elementId) {
@@ -1396,15 +1748,27 @@ async function _captureDiagramPng(elementId) {
 
 // ─── PDF Download ─────────────────────────────────────────────────────────────
 window.downloadPdf = async function() {
-    if (!lastScanId) {
-        alert('El PDF completo requiere análisis IA activo.\n\nConecta el backend y ejecuta un análisis para poder exportar el informe.');
-        return;
-    }
     const apiUrl = window.API_URL || 'http://localhost:8000';
+
+    // Si no hay scanId local, intentar obtener el más reciente del historial
+    let scanId = lastScanId;
+    if (!scanId) {
+        try {
+            const hResp = await fetch(`${apiUrl}/history`, { headers: authHeaders() });
+            if (hResp.ok) {
+                const list = await hResp.json();
+                if (list && list.length > 0) scanId = list[0].id;
+            }
+        } catch(_) {}
+        if (!scanId) {
+            alert('El PDF completo requiere análisis IA activo.\n\nConecta el backend y ejecuta un análisis para poder exportar el informe.');
+            return;
+        }
+    }
+
     try {
         setAiStatus('running', '⟳ Capturando diagramas...');
 
-        // Capturar los 3 diagramas renderizados en el DOM
         const [asIs, appFlow, infra] = await Promise.all([
             _captureDiagramPng('current-arch-diagram'),
             _captureDiagramPng('am'),
@@ -1417,12 +1781,41 @@ window.downloadPdf = async function() {
         if (appFlow) diagrams.appFlow = appFlow;
         if (infra)   diagrams.infra   = infra;
 
-        const r = await fetch(`${apiUrl}/export/pdf/${lastScanId}`, {
+        const r = await fetch(`${apiUrl}/export/pdf/${scanId}`, {
             method:  'POST',
             headers: authHeaders({ 'Content-Type': 'application/json' }),
             body:    JSON.stringify({ diagrams })
         });
-        if (!r.ok) { const e = await r.json(); throw new Error(e.detail || r.statusText); }
+        if (!r.ok) {
+            // Si el scanId local no existe, intentar con el más reciente del historial
+            if (r.status === 404 && scanId !== lastScanId) throw new Error('Scan no encontrado');
+            if (r.status === 404) {
+                const hResp = await fetch(`${apiUrl}/history`, { headers: authHeaders() });
+                if (hResp.ok) {
+                    const list = await hResp.json();
+                    if (list && list.length > 0) {
+                        const fallbackId = list[0].id;
+                        const r2 = await fetch(`${apiUrl}/export/pdf/${fallbackId}`, {
+                            method: 'POST',
+                            headers: authHeaders({ 'Content-Type': 'application/json' }),
+                            body: JSON.stringify({ diagrams })
+                        });
+                        if (r2.ok) {
+                            const blob2 = await r2.blob();
+                            const url2 = URL.createObjectURL(blob2);
+                            const a2 = document.createElement('a');
+                            a2.href = url2; a2.download = `modernization-report-${fallbackId.slice(0,8)}.pdf`;
+                            a2.click(); URL.revokeObjectURL(url2);
+                            lastScanId = fallbackId;
+                            setAiStatus('done', '✓ PDF descargado (scan más reciente)');
+                            return;
+                        }
+                    }
+                }
+            }
+            const e = await r.json().catch(() => ({}));
+            throw new Error(e.detail || r.statusText);
+        }
         const blob = await r.blob();
         const url  = URL.createObjectURL(blob);
         const a    = document.createElement('a');
@@ -1523,5 +1916,132 @@ window.submitJira = async function() {
     } catch(e) {
         statusEl.style.color = 'var(--red)';
         statusEl.innerText = '✗ ' + e.message.slice(0, 100);
+    }
+};
+
+// ─── Sprint 2: Diff de Modernización ─────────────────────────────────────────
+let _selectedForCompare = [];
+
+window.toggleCompareCheck = function(scanId, cb) {
+    if (cb.checked) {
+        _selectedForCompare.push(scanId);
+    } else {
+        _selectedForCompare = _selectedForCompare.filter(id => id !== scanId);
+    }
+    const bar = document.getElementById('compare-bar');
+    const btn = document.getElementById('compare-btn');
+    if (bar) bar.style.display = _selectedForCompare.length > 0 ? 'flex' : 'none';
+    if (btn) btn.style.display = _selectedForCompare.length === 2 ? 'inline-block' : 'none';
+};
+
+window.compareSelected = async function() {
+    if (_selectedForCompare.length !== 2) {
+        alert('Selecciona exactamente 2 escaneos para comparar.');
+        return;
+    }
+    const [a, b] = _selectedForCompare;
+    const apiUrl = window.API_URL || 'http://localhost:8000';
+    const resultEl = document.getElementById('compare-result');
+    if (resultEl) { resultEl.style.display = 'block'; resultEl.innerHTML = '<span style="color:var(--t2)">Comparando...</span>'; }
+    try {
+        const r = await fetch(`${apiUrl}/compare/${a}/${b}`, { headers: authHeaders() });
+        if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+        const d = await r.json();
+        if (!resultEl) return;
+        const scoreColor = d.progress_score >= 50 ? 'var(--green)' : d.progress_score >= 20 ? 'var(--yellow)' : 'var(--red)';
+        resultEl.innerHTML = `
+        <div style="padding:.8rem;background:rgba(0,0,0,.3);border:1px solid var(--purple);border-radius:10px">
+          <div style="display:flex;align-items:center;gap:.8rem;margin-bottom:.8rem;flex-wrap:wrap">
+            <h4 style="font-size:.9rem;color:var(--purple)">⚡ Diff de Modernización</h4>
+            <span style="font-size:.7rem;color:var(--t2)">${d.scan_a.hostname} @ ${d.scan_a.timestamp} → ${d.scan_b.timestamp}</span>
+            <span style="margin-left:auto;font-size:1.1rem;font-weight:700;color:${scoreColor}">${d.progress_score}% progreso</span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:.8rem;font-size:.75rem">
+            <div>
+              <div style="color:var(--green);font-weight:700;margin-bottom:.4rem">✅ Resueltos (${d.resolved.length})</div>
+              ${d.resolved.length ? d.resolved.map(x => `<div style="padding:.2rem 0;color:#a0d0a0">▸ ${x}</div>`).join('') : '<div style="color:var(--t2)">—</div>'}
+            </div>
+            <div>
+              <div style="color:var(--yellow);font-weight:700;margin-bottom:.4rem">⚠ Persisten (${d.persisted.length})</div>
+              ${d.persisted.length ? d.persisted.map(x => `<div style="padding:.2rem 0;color:#d0c080">▸ ${x}</div>`).join('') : '<div style="color:var(--t2)">—</div>'}
+            </div>
+            <div>
+              <div style="color:var(--red);font-weight:700;margin-bottom:.4rem">⚡ Nuevos (${d.new.length})</div>
+              ${d.new.length ? d.new.map(x => `<div style="padding:.2rem 0;color:#d09090">▸ ${x}</div>`).join('') : '<div style="color:var(--t2)">—</div>'}
+            </div>
+          </div>
+        </div>`;
+    } catch(e) {
+        if (resultEl) resultEl.innerHTML = `<span style="color:var(--red)">Error: ${e.message}</span>`;
+    }
+};
+
+// ─── Sprint 3: Portfolio Multi-Servidor ──────────────────────────────────────
+window.loadPortfolio = async function() {
+    const apiUrl = window.API_URL || 'http://localhost:8000';
+    const tbody  = document.getElementById('portfolio-body');
+    const summEl = document.getElementById('portfolio-summary');
+    if (tbody) tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:1rem;color:var(--t2)">Cargando...</td></tr>';
+    try {
+        const r = await fetch(`${apiUrl}/dashboard/portfolio`, { headers: authHeaders() });
+        if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+        const d = await r.json();
+
+        // Summary pills
+        if (summEl) {
+            summEl.innerHTML = [
+                `<div style="padding:.3rem .8rem;background:rgba(0,163,255,.15);border:1px solid var(--blue);border-radius:20px;font-size:.72rem">🖥️ <b>${d.total_servers}</b> servidores</div>`,
+                `<div style="padding:.3rem .8rem;background:rgba(255,50,50,.15);border:1px solid var(--red);border-radius:20px;font-size:.72rem">🔴 <b>${d.critical}</b> críticos</div>`,
+                `<div style="padding:.3rem .8rem;background:rgba(249,212,35,.15);border:1px solid var(--yellow);border-radius:20px;font-size:.72rem">⚠️ <b>${d.high}</b> altos</div>`,
+                `<div style="padding:.3rem .8rem;background:rgba(0,255,150,.15);border:1px solid var(--green);border-radius:20px;font-size:.72rem">✅ <b>${d.low}</b> bajos</div>`,
+            ].join('');
+        }
+
+        if (!d.servers || !d.servers.length) {
+            if (tbody) tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:1rem;color:var(--t2)">Sin datos aún. Ejecuta al menos un análisis.</td></tr>';
+            return;
+        }
+
+        const _riskColor = r => r === 'CRÍTICO' ? 'var(--red)' : r === 'ALTO' ? 'var(--yellow)' : 'var(--green)';
+        if (tbody) tbody.innerHTML = d.servers.map(s => `
+        <tr style="border-bottom:1px solid var(--bdr);transition:background .2s" onmouseover="this.style.background='rgba(255,255,255,.04)'" onmouseout="this.style.background=''"  >
+          <td style="padding:.5rem .4rem;font-weight:600;color:var(--blue)">${s.hostname}</td>
+          <td style="text-align:center;padding:.5rem .4rem">
+            <span style="font-size:1.1rem;font-weight:700;color:${_riskColor(s.risk_level)}">${s.coupling_score}</span>
+            <span style="font-size:.65rem;color:var(--t2)">/10</span>
+          </td>
+          <td style="text-align:center;padding:.5rem .4rem">
+            <span style="padding:.15rem .5rem;border-radius:12px;font-size:.65rem;font-weight:700;background:${_riskColor(s.risk_level)}22;color:${_riskColor(s.risk_level)};border:1px solid ${_riskColor(s.risk_level)}">${s.risk_level}</span>
+          </td>
+          <td style="padding:.5rem .4rem;font-size:.72rem;color:var(--t2)">${s.approach || '—'}</td>
+          <td style="text-align:center;padding:.5rem .4rem;color:var(--t2);font-size:.72rem">${s.total_scans}</td>
+          <td style="text-align:center;padding:.5rem .4rem;font-size:.68rem;color:var(--t2)">${s.last_scan}</td>
+          <td style="text-align:center;padding:.5rem .4rem">
+            <button class="bsm" onclick="downloadRunbook('${s.last_scan_id}')" title="Descargar runbook bash">📜 Runbook</button>
+          </td>
+        </tr>`).join('');
+    } catch(e) {
+        if (tbody) tbody.innerHTML = `<tr><td colspan="7" style="color:var(--red);text-align:center;padding:1rem">Error: ${e.message}</td></tr>`;
+    }
+};
+
+// ─── Sprint 3: Descargar Runbook ──────────────────────────────────────────────
+window.downloadRunbook = async function(scanId) {
+    if (!scanId) scanId = lastScanId;
+    if (!scanId) { alert('No hay scan activo. Realiza un análisis primero.'); return; }
+    const apiUrl = window.API_URL || 'http://localhost:8000';
+    try {
+        const r = await fetch(`${apiUrl}/generate/runbook/${scanId}`, { headers: authHeaders() });
+        if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+        const blob = await r.blob();
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href = url;
+        const cd = r.headers.get('Content-Disposition') || '';
+        a.download = cd.match(/filename=([^\s;]+)/)?.[1] || `runbook_${scanId.slice(0,8)}.sh`;
+        a.click();
+        URL.revokeObjectURL(url);
+    } catch(e) {
+        alert('Error descargando runbook: ' + e.message);
     }
 };
