@@ -90,8 +90,8 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
     <input id="login-user" type="text" placeholder="admin" style="width:100%;margin-bottom:.7rem" autocomplete="username">
     <label style="font-size:.68rem;color:var(--t2);display:block;margin-bottom:.3rem">Contraseña</label>
     <input id="login-pass" type="password" placeholder="••••••••" style="width:100%;margin-bottom:1.2rem"
-           autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
-    <button class="btn" style="width:100%;margin-top:0" onclick="doLogin()" id="login-btn">Ingresar</button>
+           autocomplete="current-password">
+    <button class="btn" style="width:100%;margin-top:0" id="login-btn">Ingresar</button>
   </div>
 </div>
 
@@ -551,7 +551,27 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
 </main>
 </div>
 
+<script>
+  // Conecta eventos de login una vez que app.js (module) haya cargado
+  // Necesario porque type="module" carga en diferido y los inline onclick fallan
+  (function wireLogin() {
+    const MAX_WAIT = 3000; // ms
+    const start = Date.now();
+    function attach() {
+      const btn  = document.getElementById('login-btn');
+      const pass = document.getElementById('login-pass');
+      if (btn && pass && typeof window.doLogin === 'function') {
+        btn.addEventListener('click', () => window.doLogin());
+        pass.addEventListener('keydown', e => { if (e.key === 'Enter') window.doLogin(); });
+      } else if (Date.now() - start < MAX_WAIT) {
+        setTimeout(attach, 80);
+      }
+    }
+    document.addEventListener('DOMContentLoaded', attach);
+  })();
+</script>
 <script type="module" src="app.js"></script>
+
 </body>
 </html>
 
