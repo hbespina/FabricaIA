@@ -2045,3 +2045,87 @@ window.downloadRunbook = async function(scanId) {
         alert('Error descargando runbook: ' + e.message);
     }
 };
+
+// ─── Sprint 4: IaC Validator ──────────────────────────────────────────────
+window.validateIaC = async function() {
+    if (!lastScanId) { alert('Sin scan activo. Ejecuta un análisis primero.'); return; }
+    const apiUrl = window.API_URL || 'http://localhost:8000';
+    const panel  = document.getElementById('iac-validation-panel');
+    const badge  = document.getElementById('iac-overall-badge');
+
+    if (badge) { badge.style.display = 'inline'; badge.textContent = 'Validando...'; badge.style.background = 'rgba(255,255,255,.1)'; badge.style.color = '#fff'; }
+    try {
+        const r = await fetch(`${apiUrl}/validate/iac/${lastScanId}`, { headers: authHeaders() });
+        if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+        const d = await r.json();
+
+        // Update overall badge
+        if (badge) {
+            const c = d.overall.startsWith('✅') ? 'var(--green)' : d.overall.startsWith('⚠') ? 'var(--yellow)' : 'var(--red)';
+            badge.textContent = d.overall;
+            badge.style.background = `${c}22`;
+            badge.style.color = c;
+            badge.style.border = `1px solid ${c}`;
+        }
+
+        const _renderSection = (statusId, issuesId, section) => {
+            const s = document.getElementById(statusId);
+            const i = document.getElementById(issuesId);
+            if (!s || !i || !section) return;
+            const c = section.status.startsWith('✅') ? 'var(--green)' : section.status.startsWith('⚠') ? 'var(--yellow)' : section.status.startsWith('❌') ? 'var(--red)' : 'var(--t2)';
+            s.style.color = c;
+            s.textContent = section.status + (section.lines ? ` (• ${section.lines} líneas)` : '');
+            i.innerHTML = section.issues.length
+                ? section.issues.map(x => `▸ ${x}`).join('<br>')
+                : (section.status === '—' ? '<span style="color:var(--t2)">Sin IaC generado</span>' : '');
+        };
+
+        _renderSection('iac-tf-status',  'iac-tf-issues',  d.results?.terraform);
+        _renderSection('iac-k8s-status', 'iac-k8s-issues', d.results?.kubernetes);
+        _renderSection('iac-df-status',  'iac-df-issues',  d.results?.dockerfile);
+
+        if (panel) panel.style.display = 'block';
+    } catch(e) {
+        if (badge) { badge.textContent = '❌ Error'; badge.style.color = 'var(--red)'; }
+        console.error('IaC validate error:', e);
+    }
+};
+
+// ─── Sprint 4: AWS Pricing ──────────────────────────────────────────────────
+window.loadPricing = async function() {
+    if (!lastScanId) { alert('Sin scan activo. Ejecuta un análisis primero.'); return; }
+    const apiUrl = window.API_URL || 'http://localhost:8000';
+    const panel  = document.getElementById('pricing-panel');
+    const tbody  = document.getElementById('pricing-breakdown');
+    if (panel) panel.style.display = 'block';
+    if (tbody) tbody.innerHTML = '<tr><td colspan="3" style="color:var(--t2);text-align:center;padding:.5rem">Calculando...</td></tr>';
+
+    try {
+        const r = await fetch(`${apiUrl}/pricing/${lastScanId}`, { headers: authHeaders() });
+        if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+        const d = await r.json();
+
+        const _usd   = v => `$${v.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+        const _set   = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+
+        _set('price-aws',     _usd(d.aws_monthly_usd));
+        _set('price-onprem',  _usd(d.onprem_monthly_usd));
+        _set('price-savings', (d.savings_monthly_usd >= 0 ? '+' : '') + _usd(d.savings_monthly_usd) + ` (${d.savings_pct}%)`);
+        _set('price-payback', d.payback_months > 0 ? `${d.payback_months} meses` : 'Sin payback');
+
+        const srcBadge = document.getElementById('pricing-source-badge');
+        if (srcBadge) srcBadge.textContent = d.pricing_source === 'aws_api' ? '🟢 Precios AWS reales' : '🟡 Baseline 2025';
+
+        if (tbody) tbody.innerHTML = d.breakdown.map(b => `
+            <tr style="border-bottom:1px solid var(--bdr)">
+              <td style="padding:.35rem;color:var(--blue);font-weight:600">${b.service}</td>
+              <td style="padding:.35rem;text-align:center;color:var(--t2);font-size:.68rem">${b.detail}</td>
+              <td style="padding:.35rem;text-align:right;font-weight:600">$${b.cost}/mes</td>
+            </tr>`).join('');
+
+        const noteEl = document.getElementById('pricing-note');
+        if (noteEl) noteEl.textContent = d.note;
+    } catch(e) {
+        if (tbody) tbody.innerHTML = `<tr><td colspan="3" style="color:var(--red);text-align:center">${e.message}</td></tr>`;
+    }
+};

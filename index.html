@@ -392,12 +392,80 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
   </div>
 
   <div class="page" id="p3">
+    <!-- IaC Header / Actions -->
+    <div style="display:flex;align-items:center;gap:.8rem;margin-bottom:1rem;flex-wrap:wrap">
+      <h3 style="font-size:1rem;margin:0">Infrastructure as Code</h3>
+      <button class="bsm" id="iac-validate-btn" onclick="validateIaC()" style="background:rgba(0,255,150,.15);border-color:var(--green);color:var(--green)" title="Validar sintaxis de Terraform, K8s y Dockerfile">🔍 Validar IaC</button>
+      <button class="bsm" id="pricing-btn" onclick="loadPricing()" style="background:rgba(0,163,255,.15);border-color:var(--blue);color:var(--blue)" title="Calcular costos AWS reales del stack detectado">💰 Pricing AWS</button>
+      <span id="iac-overall-badge" style="font-size:.72rem;padding:.2rem .6rem;border-radius:12px;display:none"></span>
+    </div>
+
+    <!-- IaC Validation Results -->
+    <div id="iac-validation-panel" style="display:none;margin-bottom:1rem">
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:.6rem">
+        <div class="card" style="padding:.6rem">
+          <div style="font-size:.65rem;color:var(--t2);margin-bottom:.3rem;font-weight:700">TERRAFORM</div>
+          <div id="iac-tf-status" style="font-size:.8rem;font-weight:700"></div>
+          <div id="iac-tf-issues" style="font-size:.68rem;color:var(--yellow);margin-top:.3rem;line-height:1.5"></div>
+        </div>
+        <div class="card" style="padding:.6rem">
+          <div style="font-size:.65rem;color:var(--t2);margin-bottom:.3rem;font-weight:700">KUBERNETES</div>
+          <div id="iac-k8s-status" style="font-size:.8rem;font-weight:700"></div>
+          <div id="iac-k8s-issues" style="font-size:.68rem;color:var(--yellow);margin-top:.3rem;line-height:1.5"></div>
+        </div>
+        <div class="card" style="padding:.6rem">
+          <div style="font-size:.65rem;color:var(--t2);margin-bottom:.3rem;font-weight:700">DOCKERFILE</div>
+          <div id="iac-df-status" style="font-size:.8rem;font-weight:700"></div>
+          <div id="iac-df-issues" style="font-size:.68rem;color:var(--yellow);margin-top:.3rem;line-height:1.5"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- AWS Pricing Panel -->
+    <div id="pricing-panel" style="display:none;margin-bottom:1rem">
+      <div class="card pt" style="border-left:3px solid var(--blue)">
+        <div style="display:flex;align-items:center;gap:.8rem;flex-wrap:wrap;margin-bottom:.8rem">
+          <h4 style="font-size:.9rem;color:var(--blue)">💰 Estimación de Costos AWS</h4>
+          <span id="pricing-source-badge" style="font-size:.62rem;padding:.15rem .5rem;border-radius:10px;background:rgba(0,163,255,.15);color:var(--blue);border:1px solid var(--blue)"></span>
+          <span style="font-size:.68rem;color:var(--t2);margin-left:auto">us-east-1</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:.8rem;margin-bottom:1rem">
+          <div style="text-align:center">
+            <div style="font-size:.6rem;color:var(--t2)">AWS/MES</div>
+            <div id="price-aws" style="font-size:1.3rem;font-weight:700;color:var(--green)">—</div>
+          </div>
+          <div style="text-align:center">
+            <div style="font-size:.6rem;color:var(--t2)">ON-PREM/MES</div>
+            <div id="price-onprem" style="font-size:1.3rem;font-weight:700;color:var(--red)">—</div>
+          </div>
+          <div style="text-align:center">
+            <div style="font-size:.6rem;color:var(--t2)">AHORRO/MES</div>
+            <div id="price-savings" style="font-size:1.3rem;font-weight:700;color:var(--blue)">—</div>
+          </div>
+          <div style="text-align:center">
+            <div style="font-size:.6rem;color:var(--t2)">PAYBACK</div>
+            <div id="price-payback" style="font-size:1.3rem;font-weight:700;color:var(--yellow)">—</div>
+          </div>
+        </div>
+        <table style="width:100%;font-size:.73rem;border-collapse:collapse">
+          <thead><tr style="border-bottom:1px solid var(--bdr)">
+            <th style="text-align:left;padding:.3rem;color:var(--t2)">Servicio AWS</th>
+            <th style="text-align:center;padding:.3rem;color:var(--t2)">Detalle</th>
+            <th style="text-align:right;padding:.3rem;color:var(--t2)">Costo/mes</th>
+          </tr></thead>
+          <tbody id="pricing-breakdown"></tbody>
+        </table>
+        <div id="pricing-note" style="font-size:.62rem;color:var(--t2);margin-top:.6rem;font-style:italic"></div>
+      </div>
+    </div>
+
     <div class="g2">
       <div class="card"><h3 style="font-size:.9rem">Terraform</h3><pre id="tf"></pre></div>
       <div class="card"><h3 style="font-size:.9rem">Kubernetes</h3><pre id="k8s"></pre></div>
     </div>
     <div class="card"><h3 style="font-size:.9rem">Dockerfile</h3><pre id="dock"></pre></div>
   </div>
+
 
   <div class="page" id="p4">
     <div class="card pt"><h3 style="font-size:1.2rem">Historial de Servidores Analizados</h3>

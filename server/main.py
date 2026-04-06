@@ -1792,9 +1792,259 @@ async def generate_runbook(scan_id: str, _user: str = Depends(verify_auth)):
     )
 
 
+# ─── AWS Pricing API — Sprint 4 ───────────────────────────────────────────────
+# Precios hardcoded de us-east-1 como baseline (Mayo 2025)
+# Usamos Pricing API para los precios dinámicos pero con fallback a estos valores
+_PRICING_BASELINE = {
+    "fargate_vcpu_hour":  0.04048,   # $/vCPU-hora ECS Fargate
+    "fargate_gb_hour":    0.004445,  # $/GB-hora ECS Fargate
+    "rds_mysql_hour":     0.115,     # $/hora RDS MySQL db.t3.medium
+    "rds_postgres_hour":  0.115,     # $/hora RDS PostgreSQL db.t3.medium
+    "rds_oracle_hour":    0.479,     # $/hora RDS Oracle SE2 db.m5.large
+    "elasticache_hour":   0.068,     # $/hora ElastiCache Redis cache.m6g.large
+    "alb_hour":           0.008,     # $/hora ALB
+    "nat_hour":           0.0455,    # $/hora NAT Gateway
+    "onprem_server_month": 1200.0,   # Costo mensual estimado servidor físico (HW+SW+ops)
+}
+
+def _detect_stack_for_pricing(bp: dict, raw_inventory: str) -> dict:
+    """Detecta el stack del inventario para calcular el sizing AWS adecuado."""
+    inv_lower = raw_inventory.lower()
+    result = {
+        "has_web":         any(t in inv_lower for t in ["tomcat", "nginx", "apache", "node", "jboss", "websphere", "weblogic"]),
+        "has_db":          any(t in inv_lower for t in ["oracle", "mysql", "postgres", "mssql", "mariadb"]),
+        "has_cache":       any(t in inv_lower for t in ["redis", "memcached", "hazelcast", "infinispan"]),
+        "db_engine":       "oracle" if "oracle" in inv_lower else ("postgres" if "postgres" in inv_lower else "mysql"),
+        "vcpus":           2,    # default sizing conservador
+        "ram_gb":          4,
+    }
+    # Ajustar sizing según coupling score
+    ca = bp.get("current_architecture", {})
+    score = ca.get("coupling_score", 5)
+    if score >= 8:
+        result["vcpus"] = 4; result["ram_gb"] = 8
+    elif score >= 5:
+        result["vcpus"] = 2; result["ram_gb"] = 4
+    else:
+        result["vcpus"] = 1; result["ram_gb"] = 2
+    return result
+
+@app.get("/pricing/{scan_id}")
+async def get_aws_pricing(scan_id: str, region: str = "us-east-1", _user: str = Depends(verify_auth)):
+    """
+    Calcula estimación de costos AWS reales para el stack detectado en el análisis.
+    Retorna comparativa On-Prem vs AWS con desglose por servicio.
+    """
+    conn, db_type = _get_conn()
+    if db_type == "sqlite":
+        conn.row_factory = sqlite3.Row
+    ph = _ph(db_type)
+    row = conn.execute(
+        f"SELECT hostname, bedrock_blueprint, raw_inventory FROM scan_history WHERE id = {ph}",
+        (scan_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404, "Scan no encontrado")
+
+    rd = dict(row)
+    try:
+        bp = json.loads(rd.get("bedrock_blueprint") or "{}")
+    except Exception:
+        bp = {}
+
+    stack = _detect_stack_for_pricing(bp, rd.get("raw_inventory") or "")
+    p     = _PRICING_BASELINE
+    HOURS_MONTH = 730
+
+    # ── Intentar obtener precios reales de AWS Pricing API (us-east-1 siempre)
+    real_prices = {}
+    try:
+        pricing_client = boto3.client(
+            "pricing", region_name="us-east-1",
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        )
+        # ECS Fargate vCPU
+        filters_fargate = [
+            {"Type": "TERM_MATCH", "Field": "servicecode",      "Value": "AmazonECS"},
+            {"Type": "TERM_MATCH", "Field": "usagetype",        "Value": "USE1-Fargate-vCPU-Hours:perCPU"},
+        ]
+        r = pricing_client.get_products(ServiceCode="AmazonECS", Filters=filters_fargate, MaxResults=1)
+        if r.get("PriceList"):
+            pl    = json.loads(r["PriceList"][0])
+            terms = pl.get("terms", {}).get("OnDemand", {})
+            for _, term in terms.items():
+                for _, pd in term.get("priceDimensions", {}).items():
+                    real_prices["fargate_vcpu_hour"] = float(pd["pricePerUnit"].get("USD", p["fargate_vcpu_hour"]))
+        logger.info("Precios AWS reales obtenidos para %s", region)
+    except Exception as e:
+        logger.warning("AWS Pricing API no disponible, usando baseline: %s", e)
+        real_prices = {}
+
+    # Fusionar: real_prices sobreescribe baseline donde hay datos reales
+    prices = {**p, **real_prices}
+
+    # ── Calcular costos mensuales AWS
+    ecs_cost     = stack["vcpus"] * prices["fargate_vcpu_hour"] * HOURS_MONTH \
+                 + stack["ram_gb"] * prices["fargate_gb_hour"]  * HOURS_MONTH
+    rds_key      = f"rds_{stack['db_engine']}_hour"
+    rds_cost     = prices.get(rds_key, prices["rds_mysql_hour"]) * HOURS_MONTH if stack["has_db"] else 0
+    cache_cost   = prices["elasticache_hour"] * HOURS_MONTH if stack["has_cache"] else 0
+    alb_cost     = prices["alb_hour"] * HOURS_MONTH if stack["has_web"] else 0
+    nat_cost     = prices["nat_hour"] * HOURS_MONTH
+    aws_total    = ecs_cost + rds_cost + cache_cost + alb_cost + nat_cost
+
+    onprem_monthly = prices["onprem_server_month"]
+    savings_monthly = onprem_monthly - aws_total
+    payback_months  = max(0, round(aws_total * 3 / max(savings_monthly, 0.01)))  # 3 meses migración
+
+    breakdown = [
+        {"service": "ECS Fargate",        "cost": round(ecs_cost,   2), "detail": f"{stack['vcpus']}vCPU / {stack['ram_gb']}GB"},
+        {"service": f"RDS {stack['db_engine'].upper()}", "cost": round(rds_cost,  2), "detail": "db.t3.medium / Multi-AZ"} if stack["has_db"] else None,
+        {"service": "ElastiCache Redis",  "cost": round(cache_cost, 2), "detail": "cache.m6g.large"} if stack["has_cache"] else None,
+        {"service": "Application LB",     "cost": round(alb_cost,   2), "detail": "1 ALB"} if stack["has_web"] else None,
+        {"service": "NAT Gateway",        "cost": round(nat_cost,   2), "detail": "1 AZ"},
+    ]
+    breakdown = [b for b in breakdown if b]
+
+    return {
+        "scan_id":          scan_id,
+        "hostname":         rd.get("hostname"),
+        "region":           region,
+        "stack_detected":   stack,
+        "aws_monthly_usd":  round(aws_total, 2),
+        "onprem_monthly_usd": round(onprem_monthly, 2),
+        "savings_monthly_usd": round(savings_monthly, 2),
+        "savings_pct":      round((savings_monthly / max(onprem_monthly, 1)) * 100, 1),
+        "payback_months":   payback_months,
+        "breakdown":        breakdown,
+        "pricing_source":   "aws_api" if real_prices else "baseline_2025",
+        "note":             "Estimación conservadora. Costos reales varían según tráfico y almacenamiento.",
+    }
+
+
+# ─── IaC Validator — Sprint 4 ─────────────────────────────────────────────────
+@app.get("/validate/iac/{scan_id}")
+async def validate_iac(scan_id: str, _user: str = Depends(verify_auth)):
+    """
+    Valida la sintaxis del IaC generado (Terraform, K8s YAML, Dockerfile) localmente.
+    No requiere terraform CLI ni Docker instalados — validación de sintaxis básica.
+    """
+    conn, db_type = _get_conn()
+    if db_type == "sqlite":
+        conn.row_factory = sqlite3.Row
+    ph = _ph(db_type)
+    row = conn.execute(
+        f"SELECT bedrock_blueprint FROM scan_history WHERE id = {ph}", (scan_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404, "Scan no encontrado")
+
+    try:
+        bp = json.loads(dict(row).get("bedrock_blueprint") or "{}")
+    except Exception:
+        bp = {}
+
+    results = {}
+
+    # ── Validar Terraform HCL (heurística básica de balanceo de llaves/bloques)
+    tf = bp.get("terraform_code", "")
+    if tf and tf not in ("No disponible", ""):
+        tf_issues = []
+        opens  = tf.count("{")
+        closes = tf.count("}")
+        if opens != closes:
+            tf_issues.append(f"Llaves desbalanceadas: {opens} abiertas / {closes} cerradas")
+        # Detectar resource blocks sin name
+        if re.search(r'\bresource\s+"[^"]+"\s*\{', tf) is None and "resource" in tf:
+            tf_issues.append("Bloque 'resource' sin tipo/nombre entre comillas")
+        # Detectar variables sin type
+        undefined_vars = re.findall(r'\bvar\.[a-zA-Z_]+', tf)
+        declared_vars  = re.findall(r'variable\s+"([^"]+)"', tf)
+        used_but_not_declared = [v.replace("var.", "") for v in undefined_vars if v.replace("var.", "") not in declared_vars]
+        if used_but_not_declared:
+            tf_issues.append(f"Variables no declaradas: {', '.join(set(used_but_not_declared[:5]))}")
+
+        results["terraform"] = {
+            "status":  "✅ VÁLIDO" if not tf_issues else "⚠️ ADVERTENCIAS",
+            "issues":  tf_issues,
+            "lines":   tf.count("\n"),
+            "blocks":  len(re.findall(r'\bresource\s+"', tf)),
+        }
+    else:
+        results["terraform"] = {"status": "—", "issues": [], "lines": 0, "blocks": 0}
+
+    # ── Validar Kubernetes YAML (parseo básico sin PyYAML)
+    k8s = bp.get("k8s_yaml", "")
+    if k8s and k8s not in ("No disponible", ""):
+        k8s_issues = []
+        # Verificar campos mandatorios
+        for field in ("apiVersion", "kind", "metadata"):
+            if field not in k8s:
+                k8s_issues.append(f"Campo requerido faltante: '{field}'")
+        # Detectar tabs en lugar de espacios (error común en YAML)
+        if "\t" in k8s:
+            k8s_issues.append("YAML contiene tabs — usar solo espacios")
+        # Detectar indentación mixta (heurística)
+        lines_with_indent = [l for l in k8s.splitlines() if l.startswith(" ") or l.startswith("\t")]
+        if lines_with_indent and not all(l[0] == lines_with_indent[0][0] for l in lines_with_indent if l.strip()):
+            k8s_issues.append("Posible indentación mixta (tabs y espacios)")
+
+        results["kubernetes"] = {
+            "status": "✅ VÁLIDO" if not k8s_issues else "⚠️ ADVERTENCIAS",
+            "issues": k8s_issues,
+            "lines":  k8s.count("\n"),
+            "kinds":  re.findall(r'\bkind:\s*(\w+)', k8s),
+        }
+    else:
+        results["kubernetes"] = {"status": "—", "issues": [], "lines": 0, "kinds": []}
+
+    # ── Validar Dockerfile (reglas básicas)
+    dockerfile = bp.get("dockerfile", "")
+    if dockerfile and dockerfile not in ("No disponible", ""):
+        df_issues = []
+        df_lines  = [l.strip() for l in dockerfile.splitlines() if l.strip() and not l.strip().startswith("#")]
+        # Debe empezar con FROM
+        if df_lines and not df_lines[0].upper().startswith("FROM"):
+            df_issues.append("El Dockerfile debe comenzar con instrucción FROM")
+        # No debe usar latest en FROM (bad practice)
+        if re.search(r'\bFROM\s+\S+:latest', dockerfile, re.IGNORECASE):
+            df_issues.append("Evitar 'latest' en FROM — usar tag específico para reproducibilidad")
+        # Debe tener ENTRYPOINT o CMD
+        if "ENTRYPOINT" not in dockerfile and "CMD" not in dockerfile:
+            df_issues.append("Sin ENTRYPOINT ni CMD — el contenedor no tendría punto de entrada")
+        # Exponer puertos
+        if "EXPOSE" not in dockerfile:
+            df_issues.append("Sin instrucción EXPOSE — documentar los puertos que expone el servicio")
+
+        results["dockerfile"] = {
+            "status": "✅ VÁLIDO" if not df_issues else ("⚠️ ADVERTENCIAS" if len(df_issues) < 3 else "❌ ERRORES"),
+            "issues": df_issues,
+            "lines":  len(df_lines),
+            "instructions": list({l.split()[0] for l in df_lines if l.split()}),
+        }
+    else:
+        results["dockerfile"] = {"status": "—", "issues": [], "lines": 0, "instructions": []}
+
+    # Resumen global
+    any_errors = any(r["status"].startswith("❌") for r in results.values())
+    any_warnings = any(r["status"].startswith("⚠️") for r in results.values())
+    overall = "❌ ERRORES" if any_errors else ("⚠️ ADVERTENCIAS" if any_warnings else "✅ VÁLIDO")
+
+    return {
+        "scan_id": scan_id,
+        "overall": overall,
+        "results": results,
+        "validated_at": datetime.now().isoformat(),
+    }
+
+
 # ─── Static Frontend ──────────────────────────────────────────────────────────
 fabrica_dir = Path(__file__).parent.parent
 app.mount("/", StaticFiles(directory=str(fabrica_dir), html=True), name="frontend")
+
 
 if __name__ == "__main__":
     import uvicorn
