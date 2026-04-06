@@ -13,6 +13,7 @@ import re
 import socket
 import sqlite3
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -70,9 +71,9 @@ MAX_CHARS = 150_000
 
 # Cadena de modelos — se intenta en orden hasta que uno funcione
 MODEL_CHAIN = [
-    {"id": "amazon.nova-pro-v1:0",   "maxTokens": 4096, "label": "Nova Pro"},
-    {"id": "amazon.nova-lite-v1:0",  "maxTokens": 4096, "label": "Nova Lite"},
-    {"id": "amazon.nova-micro-v1:0", "maxTokens": 2048, "label": "Nova Micro"},
+    {"id": "amazon.nova-pro-v1:0",   "maxTokens": 5120, "label": "Nova Pro"},
+    {"id": "amazon.nova-lite-v1:0",  "maxTokens": 5120, "label": "Nova Lite"},
+    {"id": "amazon.nova-micro-v1:0", "maxTokens": 4096, "label": "Nova Micro"},
 ]
 
 # Stores en memoria
@@ -194,6 +195,7 @@ class PdfExportRequest(BaseModel):
 class AnalysisRequest(BaseModel):
     raw_data: str
     industry: str = "general"
+    force_reanalyze: bool = False   # True = ignorar caché y llamar a Bedrock de nuevo
 
 class CollectRequest(BaseModel):
     hostname: str
@@ -235,7 +237,7 @@ Eres la Orquesta de Agentes de Modernización de OTSOrchestrAI — un equipo de 
 - El campo `agent_analysis` debe tener mínimo 4 párrafos con hallazgos técnicos específicos
 - `quick_wins` son acciones realizables en < 2 semanas SIN migración a cloud (parches, configs, firewall rules)
 - `risk_matrix` debe listar los 4-6 riesgos más críticos encontrados en el inventario con probabilidad e impacto reales
-- Los bloques IaC deben ser funcionales y específicos al stack detectado
+- `code_remediation` máximo 3 ítems, fragmentos before/after cortos (< 5 líneas)
 
 ## CONTEXTO DE INDUSTRIA Y COMPLIANCE
 {industry_context}
@@ -295,34 +297,23 @@ Responde ÚNICAMENTE con JSON válido. Sin texto antes ni después. Sin markdown
       "file": "ruta/real/del/archivo.ext o componente",
       "issue": "Descripción técnica precisa del problema",
       "action": "Cambio exacto: qué línea/config/dependencia modificar",
-      "before": "fragmento de código o config actual problemático",
-      "after": "fragmento de código o config correcto",
+      "before": "fragmento actual",
+      "after": "fragmento corregido",
       "effort": "X horas",
       "priority": "P1-Crítico | P2-Alto | P3-Medio",
-      "benefit": "Qué riesgo elimina y qué mejora operacional trae"
+      "benefit": "Qué riesgo elimina"
     }}
   ],
 
-  "terraform_code": "# Terraform HCL completo y funcional para el stack detectado\\n# Incluir: VPC, ECS/EKS cluster, RDS/Aurora, ALB, IAM roles, Security Groups\\n# Variables con valores reales del entorno analizado\\n\\nterraform {{\\n  required_version = \\">=1.6\\"\\n  ...\\n}}",
-
-  "k8s_yaml": "# Kubernetes manifests para el stack detectado\\n# Incluir: Namespace, Deployment con imagen correcta, Service, HPA\\n---\\napiVersion: apps/v1\\n...",
-
-  "dockerfile": "# Dockerfile multi-stage optimizado para el runtime detectado\\n# Usar imagen base correcta para la versión encontrada\\nFROM ...",
-
   "current_architecture": {{
-    "mermaid": "graph TB\\n    classDef appserv fill:#1a2a4a,stroke:#3498db,color:#90cdf4\\n    classDef dbnode fill:#0d2b4a,stroke:#2980b9,color:#90cdf4\\n    classDef intnode fill:#3d2000,stroke:#e67e22,color:#fbd38d\\n    classDef webnode fill:#1a1a3d,stroke:#6c63ff,color:#c3b1e1\\n    classDef vampire fill:#8B0000,stroke:#FF0000,color:#fff,stroke-width:3px\\n    USR([\\\"Usuarios\\\"])\\n    subgraph SRV[\\\"Servidor AS-IS\\\"]\\n    direction TB\\n        WEB[\\\"Web Server real detectado\\\"]:::webnode\\n        APP[\\\"App Server real detectado\\\"]:::appserv\\n        DB[(\\\"Base Datos real detectada\\\")]:::vampire\\n        INT[\\\"Bus Integración real\\\"]:::vampire\\n    end\\n    USR ==> WEB\\n    WEB ==>|\\\"proxy\\\"| APP\\n    APP ==>|\\\"SQL directo\\\"| DB\\n    APP ==>|\\\"integración\\\"| INT\\n    INT ==>|\\\"write DB\\\"| DB\\n    linkStyle 0,1,2,3,4 stroke:#ff3333,stroke-width:2.5px",
     "coupling_score": 8,
-    "coupling_analysis": "Descripción ESPECÍFICA del acoplamiento: nombrar los componentes reales detectados, tipo de dependencia (SQL directo, SOAP, RMI, EJB), SPOFs identificados y por qué representan riesgo operacional",
+    "coupling_analysis": "Descripción ESPECÍFICA del acoplamiento: nombrar los componentes reales, tipo de dependencia (SQL directo, SOAP, RMI, EJB), SPOFs y riesgo operacional",
     "pain_points": [
-      "SPOF real: [componente] sin HA ni failover — si cae, [impacto concreto]",
-      "Acoplamiento directo: [AppA] llama SQL a [DB] sin connection pool — riesgo de agotamiento de conexiones",
-      "Integración síncrona SOAP/RMI entre [componentes] — sin circuit breaker ni timeout"
+      "SPOF real: [componente] sin HA — si cae, [impacto concreto]",
+      "Acoplamiento: [AppA] llama SQL a [DB] sin pool — riesgo agotamiento conexiones",
+      "Integración síncrona SOAP entre [componentes] — sin circuit breaker"
     ]
-  }},
-
-  "mermaid_app_flow": "graph TB\\n    classDef appserv fill:#1a2a4a,stroke:#3498db,color:#90cdf4\\n    classDef dbnode fill:#0d2b4a,stroke:#2980b9,color:#90cdf4\\n    classDef intnode fill:#3d2000,stroke:#e67e22,color:#fbd38d\\n    classDef vampire fill:#8B0000,stroke:#FF0000,color:#fff,stroke-width:3px\\n    USR([\\\"Usuario\\\"])\\n    subgraph COMPUTE[\\\"Compute — AS-IS\\\"]\\n        APP[\\\"App detectada\\\"]:::appserv\\n        INT[\\\"Integración detectada\\\"]:::vampire\\n    end\\n    subgraph DATA[\\\"Data — AS-IS\\\"]\\n        DB[(\\\"DB detectada\\\")]:::vampire\\n    end\\n    USR ==> APP\\n    APP ==>|\\\"SQL\\\"| DB\\n    APP ==>|\\\"SOAP/RMI\\\"| INT\\n    INT ==>|\\\"write\\\"| DB\\n    linkStyle 0,1,2,3 stroke:#ff3333,stroke-width:2.5px",
-
-  "mermaid_infra": "graph TB\\n    classDef edge fill:#1a2a4a,stroke:#FF9900,color:#FF9900\\n    classDef compute fill:#0d2b1a,stroke:#27ae60,color:#9ae6b4\\n    classDef data fill:#0d1a3a,stroke:#2980b9,color:#90cdf4\\n    classDef observe fill:#2a1a4a,stroke:#8e44ad,color:#d6bcfa\\n    INT([\\\"Internet\\\"]):::edge\\n    subgraph EDGE[\\\"Edge / Seguridad\\\"]\\n        CF[\\\"CloudFront CDN\\\"]:::edge\\n        WAF[\\\"AWS WAF\\\"]:::edge\\n        ALB[\\\"Application LB\\\"]:::edge\\n    end\\n    subgraph COMPUTE[\\\"Compute\\\"]\\n        ECS[\\\"ECS Fargate - app migrada\\\"]:::compute\\n        APIGW[\\\"API Gateway\\\"]:::compute\\n    end\\n    subgraph DATA[\\\"Data\\\"]\\n        RDS[(\\\"Aurora RDS - motor real\\\")]:::data\\n        S3[\\\"Amazon S3\\\"]:::data\\n    end\\n    subgraph OBS[\\\"Observabilidad\\\"]\\n        CW[\\\"CloudWatch\\\"]:::observe\\n        XRAY[\\\"X-Ray\\\"]:::observe\\n    end\\n    INT --> CF --> WAF --> ALB --> ECS\\n    ECS --> APIGW\\n    ECS --> RDS\\n    ECS --> S3\\n    ECS -.-> CW\\n    ECS -.-> XRAY"
+  }}
 }}
 """
 
@@ -369,13 +360,13 @@ def init_db():
     # Migracion: agregar columnas nuevas si la tabla ya existia sin ellas
     if db_type == "sqlite":
         existing = {row[1] for row in c.execute("PRAGMA table_info(scan_history)")}
-        for col, definition in [("model_used", "TEXT"), ("data_hash", "TEXT")]:
+        for col, definition in [("model_used", "TEXT"), ("data_hash", "TEXT"), ("previous_scan_id", "TEXT")]:
             if col not in existing:
                 c.execute(f"ALTER TABLE scan_history ADD COLUMN {col} {definition}")
                 logger.info("Migracion: columna '%s' agregada a scan_history", col)
     else:
         # PostgreSQL: usar ADD COLUMN IF NOT EXISTS
-        for col, definition in [("model_used", "TEXT"), ("data_hash", "TEXT")]:
+        for col, definition in [("model_used", "TEXT"), ("data_hash", "TEXT"), ("previous_scan_id", "TEXT")]:
             c.execute(f"ALTER TABLE scan_history ADD COLUMN IF NOT EXISTS {col} {definition}")
 
     conn.commit()
@@ -384,13 +375,13 @@ def init_db():
 
 init_db()
 
-def _save_scan(scan_id, hostname, raw_data, ai_response, model_used, data_hash):
+def _save_scan(scan_id, hostname, raw_data, ai_response, model_used, data_hash, previous_scan_id=None):
     conn, db_type = _get_conn()
     ph = _ph(db_type)
     conn.execute(
-        f"INSERT INTO scan_history (id, hostname, timestamp, raw_inventory, bedrock_blueprint, model_used, data_hash) "
-        f"VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph})",
-        (scan_id, hostname, datetime.now().isoformat(), raw_data, json.dumps(ai_response), model_used, data_hash)
+        f"INSERT INTO scan_history (id, hostname, timestamp, raw_inventory, bedrock_blueprint, model_used, data_hash, previous_scan_id) "
+        f"VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})",
+        (scan_id, hostname, datetime.now().isoformat(), raw_data, json.dumps(ai_response), model_used, data_hash, previous_scan_id)
     )
     conn.commit()
     conn.close()
@@ -408,6 +399,25 @@ def _find_cached_scan(data_hash: str):
     conn.close()
     return dict(row) if row else None
 
+def _find_scan_by_hostname(hostname: str, within_hours: int = 24):
+    """
+    Retorna el análisis más reciente para un hostname en las últimas N horas.
+    Garantiza informe consistente entre escaneo SSH y reutilización de caché.
+    """
+    conn, db_type = _get_conn()
+    if db_type == "sqlite":
+        conn.row_factory = sqlite3.Row
+    ph = _ph(db_type)
+    cutoff = (datetime.utcnow() - timedelta(hours=within_hours)).isoformat()
+    row = conn.execute(
+        f"SELECT id, bedrock_blueprint, model_used, timestamp, data_hash FROM scan_history "
+        f"WHERE hostname = {ph} AND timestamp > {ph} AND bedrock_blueprint IS NOT NULL "
+        f"ORDER BY timestamp DESC LIMIT 1",
+        (hostname, cutoff)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
 # ─── Bedrock Helpers ──────────────────────────────────────────────────────────
 def _bedrock_client():
     return boto3.client(
@@ -419,81 +429,404 @@ def _bedrock_client():
     )
 
 def _parse_json_response(text: str) -> dict:
+    """Parsea JSON generado por el modelo, reparando truncaciones y caracteres inválidos."""
+    # Extraer bloque JSON del texto
     match = re.search(r"(\{.*\})", text, re.DOTALL)
     raw = match.group(1) if match else text
-    return json.loads(raw, strict=False)
+
+    # Intento 1: parse directo
+    err_pos = None
+    try:
+        return json.loads(raw, strict=False)
+    except json.JSONDecodeError as e:
+        err_pos = e.pos
+        logger.warning("JSON malformado en char %d: %s — intentando reparar", e.pos, e.msg)
+
+    # Intento 2: truncar antes del error y cerrar estructuras abiertas
+    try:
+        truncated = raw[:err_pos]
+        # Retroceder hasta el último separador limpio (coma o apertura de valor)
+        for ch in reversed([',', '{', '[']):
+            idx = truncated.rfind(ch)
+            if idx > 0:
+                truncated = truncated[:idx]
+                break
+        # Contar llaves/corchetes abiertos sin cerrar
+        depth_brace = truncated.count('{') - truncated.count('}')
+        depth_bracket = truncated.count('[') - truncated.count(']')
+        closing = ']' * max(0, depth_bracket) + '}' * max(0, depth_brace)
+        return json.loads(truncated + closing, strict=False)
+    except Exception:
+        pass
+
+    # Intento 3: extraer campos clave con regex (degradación mínima)
+    result = {}
+    for key, val in re.findall(r'"(executive_summary|migration_strategy|agent_analysis|coupling_analysis)"\s*:\s*"((?:[^"\\]|\\.){0,2000})"', raw):
+        result[key] = val.replace('\\n', '\n').replace('\\"', '"')
+    for key, val in re.findall(r'"(coupling_score)"\s*:\s*(\d+)', raw):
+        result[key] = int(val)
+
+    if not result:
+        result["executive_summary"] = "Análisis generado — respuesta JSON incompleta del modelo."
+
+    logger.warning("JSON parcialmente recuperado con %d campos", len(result))
+    return result
+
+def _normalize_inventory(raw: str) -> str:
+    """
+    Elimina campos volátiles del inventario (PIDs, timestamps de proceso, uptime)
+    para que el mismo servidor genere el mismo hash entre ejecuciones distintas.
+    """
+    lines = []
+    for line in raw.splitlines():
+        # Saltar líneas de ps aux con PIDs numéricos (cambian por reinicio)
+        if re.match(r'^\s*\d+\s+\d+\s+[\d.]+\s+[\d.]+', line):
+            continue
+        # Normalizar timestamps como "Tue Apr  1 12:34:56 2026" → vacío
+        line = re.sub(r'\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\w+\s+\d+\s+[\d:]+\s+\d{4}', '', line)
+        # Normalizar uptime "up X days, Y:Z"
+        line = re.sub(r'up\s+\d+\s+(?:day|min|hour)[^,\n]*', 'up NORMALIZED', line)
+        lines.append(line)
+    return '\n'.join(lines)
 
 def _cache_key(raw_data: str) -> str:
-    return hashlib.sha256(raw_data.encode()).hexdigest()
+    normalized = _normalize_inventory(raw_data)
+    return hashlib.sha256(normalized.encode()).hexdigest()
 
-# ─── Background Job (Bedrock Async) ──────────────────────────────────────────
+# ─── RAG — Recuperación por Similitud TF-IDF ─────────────────────────────────
+def _rag_retrieve(inventory_text: str, top_k: int = 3) -> str:
+    """
+    Recupera los análisis más similares al inventario actual usando TF-IDF coseno.
+    Retorna un string listo para inyectar en el prompt como <RAG_CONTEXT>.
+    Sin dependencias externas pesadas: usa scikit-learn (TF-IDF + coseno).
+    """
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import cosine_similarity
+        import numpy as np
+
+        conn, db_type = _get_conn()
+        if db_type == "sqlite":
+            conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, hostname, bedrock_blueprint, raw_inventory FROM scan_history "
+            "WHERE bedrock_blueprint IS NOT NULL ORDER BY timestamp DESC LIMIT 80"
+        ).fetchall()
+        conn.close()
+
+        if not rows or len(rows) < 2:
+            return ""
+
+        docs = []
+        metas = []
+        for r in rows:
+            rd = dict(r)
+            inv = (rd.get("raw_inventory") or "")[:8000]
+            if inv.strip():
+                docs.append(inv)
+                metas.append(rd)
+
+        if len(docs) < 2:
+            return ""
+
+        corpus = [inventory_text[:8000]] + docs
+        vec = TfidfVectorizer(
+            max_features=3000,
+            ngram_range=(1, 2),
+            sublinear_tf=True,
+            min_df=1
+        )
+        tfidf = vec.fit_transform(corpus)
+        sims = cosine_similarity(tfidf[0:1], tfidf[1:]).flatten()
+
+        top_idx = np.argsort(sims)[::-1][:top_k]
+        parts = []
+        for i in top_idx:
+            score = float(sims[i])
+            if score < 0.08:   # umbral mínimo de relevancia
+                continue
+            meta = metas[i]
+            try:
+                bp = json.loads(meta.get("bedrock_blueprint") or "{}")
+            except Exception:
+                bp = {}
+            host = meta.get("hostname", "servidor")
+            summary = bp.get("executive_summary", "")[:400]
+            strategy = ""
+            ms = bp.get("migration_strategy", {})
+            if isinstance(ms, dict):
+                strategy = ms.get("approach", "") + " — " + ms.get("rationale", "")[:200]
+            elif isinstance(ms, str):
+                strategy = ms[:200]
+            if summary:
+                parts.append(
+                    f"[Análisis similar — score={score:.2f} host={host}]\n"
+                    f"Resumen: {summary}\n"
+                    f"Estrategia: {strategy}"
+                )
+
+        if not parts:
+            return ""
+
+        header = f"Los siguientes {len(parts)} análisis anteriores son técnicamente similares. Úsalos como contexto para ser más específico:"
+        return header + "\n\n" + "\n\n".join(parts)
+
+    except ImportError:
+        logger.warning("scikit-learn no instalado — RAG deshabilitado")
+        return ""
+    except Exception as e:
+        logger.warning("RAG error: %s", e)
+        return ""
+
+# ─── Agentic Prompts ──────────────────────────────────────────────────────────
+_AGENT_SECURITY_PROMPT = """
+Eres un CISO senior y experto en seguridad cloud. Analiza el inventario dado y retorna ÚNICAMENTE JSON válido:
+{{
+  "security_findings": [
+    {{"sev": "CRITICO|ALTO|MEDIO", "component": "nombre real", "cve": "CVE-XXXX o N/A",
+      "description": "descripción técnica con versión exacta",
+      "mitigation": "comando o config exacta para remediarlo"}}
+  ],
+  "critical_ports": ["puerto:servicio expuesto"],
+  "eol_components": ["componente vX.Y — EoL desde YYYY"],
+  "attack_surface": "descripción de superficie de ataque en 2 oraciones"
+}}
+"""
+
+_AGENT_MIGRATION_PROMPT = """
+Eres un Principal Cloud Architect de AWS. Recibes un inventario de servidor legacy junto con hallazgos de seguridad previos.
+Retorna ÚNICAMENTE JSON válido con la estrategia de migración:
+{{
+  "migration_strategy": {{"approach": "lift-and-shift|re-architect|strangler-fig|hybrid",
+    "rationale": "por qué este enfoque dado el stack",
+    "total_weeks": 16, "phases": 4}},
+  "sprints": {{
+    "sprint_0": ["TAREA [Rol] [Esfuerzo]: descripción concreta"],
+    "sprint_1": ["TAREA [Rol] [Esfuerzo]: descripción concreta"],
+    "sprint_2": ["TAREA [Rol] [Esfuerzo]: descripción concreta"],
+    "sprint_3": ["TAREA [Rol] [Esfuerzo]: descripción concreta"]
+  }},
+  "quick_wins": [
+    {{"title": "acción concreta", "description": "qué hacer exactamente",
+      "effort": "X días", "risk_reduction": "CVE o riesgo eliminado", "owner": "DevSecOps|SysAdmin|Dev"}}
+  ],
+  "risk_matrix": [
+    {{"risk": "nombre con componente real", "cve": "CVE o N/A",
+      "probability": "Alta|Media|Baja", "impact": "Crítico|Alto|Medio",
+      "mitigation": "acción concreta"}}
+  ]
+}}
+"""
+
+_AGENT_CODE_PROMPT = """
+Eres un Staff Engineer experto en refactoring de aplicaciones legacy hacia contenedores.
+Retorna ÚNICAMENTE JSON válido:
+{{
+  "agent_analysis": "Análisis técnico en 4+ párrafos: stack detectado, vulnerabilidades, deuda técnica, estrategia de containerización recomendada",
+  "code_remediation": [
+    {{"file": "ruta/real/archivo.ext", "issue": "problema técnico preciso",
+      "action": "cambio exacto requerido",
+      "before": "fragmento actual (< 5 líneas)",
+      "after": "fragmento corregido (< 5 líneas)",
+      "effort": "X horas", "priority": "P1-Crítico|P2-Alto|P3-Medio",
+      "benefit": "riesgo que elimina"}}
+  ],
+  "current_architecture": {{
+    "coupling_score": 8,
+    "coupling_analysis": "descripción del acoplamiento con componentes reales",
+    "pain_points": ["SPOF real con impacto concreto"]
+  }}
+}}
+Máximo 3 ítems en code_remediation. Usa fragmentos before/after cortos.
+"""
+
+# ─── Background Job (Bedrock Async — Agentic + RAG) ─────────────────────────
+def _call_agent(bedrock, model_id: str, max_tokens: int, system_prompt: str, user_msg: str) -> dict:
+    """Llama a un agente específico. Lanza excepción si falla."""
+    resp = bedrock.converse(
+        modelId=model_id,
+        messages=[{"role": "user", "content": [{"text": user_msg}]}],
+        system=[{"text": system_prompt}],
+        inferenceConfig={"maxTokens": max_tokens, "temperature": 0.0}
+    )
+    text = resp["output"]["message"]["content"][0]["text"]
+    return _parse_json_response(text)
+
 def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, industry: str = "general"):
     """
-    Se ejecuta en un thread separado via BackgroundTasks.
-    Intenta cada modelo en MODEL_CHAIN hasta que uno responda.
+    Análisis agéntico paralelo con RAG:
+    1. Recupera contexto de análisis similares (RAG TF-IDF)
+    2. Lanza 3 agentes especializados en paralelo (Security, Migration, Code)
+    3. Fusiona resultados en el mismo formato JSON que usaba el sistema monolítico
+    4. Fallback: si los agentes fallan, usa el prompt monolítico original
     """
     JOBS[job_id]["status"] = "running"
+    JOBS[job_id]["message"] = "Recuperando contexto RAG..."
 
     inventory = raw_data[:MAX_CHARS] + ("\n...[TRUNCADO]..." if len(raw_data) > MAX_CHARS else "")
-    knowledge = load_knowledge()
+    knowledge  = load_knowledge()
+    rag_ctx    = _rag_retrieve(raw_data)
     industry_ctx = INDUSTRY_CONTEXT.get(industry, INDUSTRY_CONTEXT["general"])
-    prompt = SYSTEM_PROMPT_TEMPLATE.format(knowledge_text=knowledge, industry_context=industry_ctx)
-    bedrock = _bedrock_client()
-    last_error = None
 
-    for model in MODEL_CHAIN:
-        mid, mlabel = model["id"], model["label"]
-        JOBS[job_id]["message"] = f"Consultando {mlabel}..."
-        logger.info("[Job %s] Intentando modelo %s", job_id[:8], mid)
+    # Prefijo común a todos los agentes: industria + knowledge + RAG
+    _common_ctx = (
+        f"## INDUSTRIA: {industry_ctx}\n\n"
+        f"## KNOWLEDGE BASE:\n{knowledge}\n\n"
+        + (f"## ANÁLISIS SIMILARES (RAG):\n{rag_ctx}\n\n" if rag_ctx else "")
+    )
 
+    bedrock     = _bedrock_client()
+    model       = MODEL_CHAIN[0]   # Agentes usan Nova Pro primero
+    mid, mlabel = model["id"], model["label"]
+    last_error  = None
+
+    # ── Intento 1: 3 agentes en paralelo ─────────────────────────────────────
+    JOBS[job_id]["message"] = f"Ejecutando 3 agentes en paralelo ({mlabel})..."
+    logger.info("[Job %s] Iniciando análisis agéntico paralelo en %s", job_id[:8], mid)
+
+    sec_result  = {}
+    mig_result  = {}
+    code_result = {}
+    agents_ok   = False
+
+    try:
+        inv_msg = f"Inventario del servidor a analizar:\n{inventory}"
+
+        def run_security():
+            return _call_agent(bedrock, mid, 2048,
+                               _common_ctx + _AGENT_SECURITY_PROMPT, inv_msg)
+
+        def run_migration():
+            # Migration agent recibe hallazgos de seguridad si están disponibles
+            ctx = inv_msg
+            if sec_result:
+                ctx += f"\n\nHallazgos de seguridad detectados:\n{json.dumps(sec_result, ensure_ascii=False)[:2000]}"
+            return _call_agent(bedrock, mid, 3072,
+                               _common_ctx + _AGENT_MIGRATION_PROMPT, ctx)
+
+        def run_code():
+            return _call_agent(bedrock, mid, 2048,
+                               _common_ctx + _AGENT_CODE_PROMPT, inv_msg)
+
+        # Etapa 1a: Security + Code en paralelo (no dependen entre sí)
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_sec  = ex.submit(run_security)
+            f_code = ex.submit(run_code)
+            for fut in as_completed([f_sec, f_code]):
+                try:
+                    res = fut.result()
+                    if fut is f_sec:
+                        sec_result.update(res)
+                    else:
+                        code_result.update(res)
+                except Exception as e:
+                    logger.warning("[Job %s] Agente falló: %s", job_id[:8], e)
+
+        # Etapa 1b: Migration (usa sec_result si está disponible)
+        JOBS[job_id]["message"] = "Agente Migration planificando sprints..."
         try:
-            resp = bedrock.converse(
-                modelId=mid,
-                messages=[{"role": "user", "content": [{"text": f"Inventario:\n{inventory}"}]}],
-                system=[{"text": prompt}],
-                inferenceConfig={"maxTokens": model["maxTokens"], "temperature": 0.3}
-            )
-            parsed_text = resp["output"]["message"]["content"][0]["text"]
-            ai_response = _parse_json_response(parsed_text)
+            mig_result = run_migration()
+        except Exception as e:
+            logger.warning("[Job %s] MigrationAgent falló: %s", job_id[:8], e)
 
-            scan_id = str(uuid.uuid4())
-            _save_scan(scan_id, hostname, raw_data, ai_response, mid, data_hash)
+        agents_ok = bool(sec_result or mig_result or code_result)
 
-            # Guardar en cache de memoria
-            ANALYSIS_CACHE[data_hash] = {
-                "scan_id": scan_id,
-                "ai_content": ai_response,
-                "model_used": mid,
-                "timestamp": datetime.now().isoformat()
-            }
+    except Exception as e:
+        last_error = str(e)
+        logger.warning("[Job %s] Fallo en bloque agéntico: %s", job_id[:8], e)
 
-            JOBS[job_id].update({
-                "status": "completed",
-                "message": f"Completado con {mlabel}",
-                "model_used": mid,
-                "scan_id": scan_id,
-                "ai_content": ai_response
-            })
-            logger.info("[Job %s] Exitoso con %s", job_id[:8], mid)
+    # ── Fusión de resultados agénticos ───────────────────────────────────────
+    if agents_ok:
+        # Construir executive_summary desde los hallazgos de seguridad
+        top_findings = sec_result.get("security_findings", [])
+        attack  = sec_result.get("attack_surface", "")
+        eol_list = sec_result.get("eol_components", [])
+        exec_summary = (
+            f"Sistema analizado con {len(top_findings)} hallazgos de seguridad. "
+            + (f"Superficie de ataque: {attack} " if attack else "")
+            + (f"Componentes EoL: {', '.join(eol_list[:3])}." if eol_list else "")
+        ) or code_result.get("agent_analysis", "")[:300]
+
+        ai_response = {
+            "executive_summary":  exec_summary,
+            "agent_analysis":     code_result.get("agent_analysis", ""),
+            "migration_strategy": mig_result.get("migration_strategy", {}),
+            "sprints":            mig_result.get("sprints", {}),
+            "quick_wins":         mig_result.get("quick_wins", []),
+            "risk_matrix":        mig_result.get("risk_matrix", []),
+            "code_remediation":   code_result.get("code_remediation", []),
+            "current_architecture": code_result.get("current_architecture", {}),
+            # Metadatos extra de los agentes
+            "security_findings":   sec_result.get("security_findings", []),
+            "critical_ports":      sec_result.get("critical_ports", []),
+            "eol_components":      sec_result.get("eol_components", []),
+            "_analysis_method":    "agentic_parallel",
+            "_rag_used":           bool(rag_ctx),
+        }
+        logger.info("[Job %s] Agéntico OK — sec=%d mig=%d code=%d rag=%s",
+                    job_id[:8], len(top_findings),
+                    len(mig_result.get("sprints", {})),
+                    len(code_result.get("code_remediation", [])),
+                    bool(rag_ctx))
+
+    else:
+        # ── Fallback: prompt monolítico original ─────────────────────────────
+        JOBS[job_id]["message"] = "Fallback a análisis monolítico..."
+        logger.warning("[Job %s] Agéntico falló — usando prompt monolítico", job_id[:8])
+        ai_response = None
+        prompt = SYSTEM_PROMPT_TEMPLATE.format(
+            knowledge_text=knowledge + ("\n\nRAG:\n" + rag_ctx if rag_ctx else ""),
+            industry_context=industry_ctx
+        )
+        for model_fb in MODEL_CHAIN:
+            mid_fb = model_fb["id"]
+            JOBS[job_id]["message"] = f"Consultando {model_fb['label']} (fallback)..."
+            try:
+                resp = bedrock.converse(
+                    modelId=mid_fb,
+                    messages=[{"role": "user", "content": [{"text": f"Inventario:\n{inventory}"}]}],
+                    system=[{"text": prompt}],
+                    inferenceConfig={"maxTokens": model_fb["maxTokens"], "temperature": 0.0}
+                )
+                text = resp["output"]["message"]["content"][0]["text"]
+                ai_response = _parse_json_response(text)
+                ai_response["_analysis_method"] = "monolithic_fallback"
+                ai_response["_rag_used"] = bool(rag_ctx)
+                mid = mid_fb
+                break
+            except Exception as e:
+                last_error = str(e)
+                logger.warning("[Job %s] Fallback %s falló: %s", job_id[:8], mid_fb, e)
+
+        if not ai_response:
+            JOBS[job_id].update({"status": "failed", "message": "Todos los modelos fallaron", "error": last_error})
+            logger.error("[Job %s] Todos fallaron. Último error: %s", job_id[:8], last_error)
             return
 
-        except Exception as e:
-            last_error = str(e)
-            logger.warning("[Job %s] %s falló: %s", job_id[:8], mid, e)
-            continue
-
-    # Todos los modelos fallaron
+    # ── Guardar resultado ─────────────────────────────────────────────────────
+    scan_id = str(uuid.uuid4())
+    # Buscar el scan anterior del mismo hostname para el diff de modernización
+    prev_row = _find_scan_by_hostname(hostname, within_hours=876600)  # cualquier scan previo
+    prev_scan_id = prev_row["id"] if prev_row else None
+    _save_scan(scan_id, hostname, raw_data, ai_response, mid, data_hash, prev_scan_id)
+    ANALYSIS_CACHE[data_hash] = {
+        "scan_id": scan_id, "ai_content": ai_response,
+        "model_used": mid, "timestamp": datetime.now().isoformat()
+    }
     JOBS[job_id].update({
-        "status": "failed",
-        "message": "Todos los modelos fallaron",
-        "error": last_error
+        "status":     "completed",
+        "message":    f"Completado ({ai_response.get('_analysis_method','agentic')})",
+        "model_used": mid,
+        "scan_id":    scan_id,
+        "ai_content": ai_response
     })
-    logger.error("[Job %s] Todos fallaron. Último error: %s", job_id[:8], last_error)
+    logger.info("[Job %s] Guardado scan %s", job_id[:8], scan_id[:8])
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "4.0.0", "db": "postgresql" if DATABASE_URL else "sqlite"}
+    return {"status": "ok", "version": "5.0.0", "db": "postgresql" if DATABASE_URL else "sqlite",
+            "features": ["rag", "agentic", "diff", "readiness", "portfolio", "runbook"]}
 
 @app.post("/auth/login")
 async def login(body: LoginRequest):
@@ -516,38 +849,44 @@ def analyze_legacy(
 ):
     raw_data = body.raw_data
     industry = body.industry if body.industry in INDUSTRY_CONTEXT else "general"
+    force    = getattr(body, "force_reanalyze", False)
     m = re.search(r"HOSTNAME:\s*([^\n]+)", raw_data, re.IGNORECASE)
     hostname = m.group(1).strip() if m else "remote-host"
-    # Include industry in cache key so different industries get different analyses
     data_hash = _cache_key(raw_data + "|industry=" + industry)
 
-    # 1. Cache en memoria (más rápido)
-    if data_hash in ANALYSIS_CACHE:
-        c = ANALYSIS_CACHE[data_hash]
-        logger.info("Cache hit (memoria): %s", data_hash[:8])
-        return {
-            "status": "completed", "method": "cache",
-            "scan_id": c["scan_id"], "model_used": c["model_used"],
-            "ai_content": c["ai_content"]
-        }
-
-    # 2. Cache en DB
-    db_row = _find_cached_scan(data_hash)
-    if db_row:
-        ai = json.loads(db_row["bedrock_blueprint"]) if isinstance(db_row["bedrock_blueprint"], str) else db_row["bedrock_blueprint"]
+    def _cached_response(source: str, scan_id: str, model_used: str, ai: dict):
         ANALYSIS_CACHE[data_hash] = {
-            "scan_id": db_row["id"], "ai_content": ai,
-            "model_used": db_row.get("model_used", "cached"),
-            "timestamp": db_row["timestamp"]
+            "scan_id": scan_id, "ai_content": ai,
+            "model_used": model_used, "timestamp": datetime.now().isoformat()
         }
-        logger.info("Cache hit (DB): %s", data_hash[:8])
-        return {
-            "status": "completed", "method": "cache_db",
-            "scan_id": db_row["id"], "model_used": db_row.get("model_used", "cached"),
-            "ai_content": ai
-        }
+        return {"status": "completed", "method": source, "scan_id": scan_id,
+                "model_used": model_used, "ai_content": ai}
 
-    # 3. Nuevo job asíncrono
+    if not force:
+        # 1. Cache en memoria (más rápido)
+        if data_hash in ANALYSIS_CACHE:
+            c = ANALYSIS_CACHE[data_hash]
+            logger.info("Cache hit (memoria): %s", data_hash[:8])
+            return {"status": "completed", "method": "cache",
+                    "scan_id": c["scan_id"], "model_used": c["model_used"],
+                    "ai_content": c["ai_content"]}
+
+        # 2. Cache en DB — mismo hash normalizado
+        db_row = _find_cached_scan(data_hash)
+        if db_row:
+            ai = json.loads(db_row["bedrock_blueprint"]) if isinstance(db_row["bedrock_blueprint"], str) else db_row["bedrock_blueprint"]
+            logger.info("Cache hit (DB hash): %s", data_hash[:8])
+            return _cached_response("cache_db", db_row["id"], db_row.get("model_used", "cached"), ai)
+
+        # 3. Deduplicación por hostname (últimas 24h) — garantiza informe consistente
+        #    aunque el inventario tenga pequeñas diferencias entre ejecuciones
+        host_row = _find_scan_by_hostname(hostname, within_hours=24)
+        if host_row:
+            ai = json.loads(host_row["bedrock_blueprint"]) if isinstance(host_row["bedrock_blueprint"], str) else host_row["bedrock_blueprint"]
+            logger.info("Cache hit (hostname '%s', %s): reutilizando análisis previo", hostname, host_row["timestamp"][:16])
+            return _cached_response("cache_hostname", host_row["id"], host_row.get("model_used", "cached"), ai)
+
+    # 4. Nuevo job asíncrono
     job_id = str(uuid.uuid4())
     JOBS[job_id] = {
         "status": "pending",
@@ -556,7 +895,7 @@ def analyze_legacy(
         "created_at": datetime.now().isoformat()
     }
     background_tasks.add_task(_run_bedrock_job, job_id, raw_data, hostname, data_hash, industry)
-    logger.info("Job creado: %s para host '%s' [industria: %s]", job_id[:8], hostname, industry)
+    logger.info("Job creado: %s para host '%s' [industria: %s, force=%s]", job_id[:8], hostname, industry, force)
     return {"status": "pending", "method": "async", "job_id": job_id}
 
 @app.get("/status/{job_id}")
@@ -815,11 +1154,9 @@ def fetch_cached_inventory(body: FetchCachedRequest, _user: str = Depends(verify
 
     # Validar ruta
     raw_path = body.file_path.strip()
-    logger.warning("[fetch-cached] raw file_path recibido: %r", raw_path)
     if '..' in raw_path:
         raise HTTPException(400, "Ruta de archivo inválida o no permitida")
     m = re.search(r'modernization_reports/inventory_[\w.\-]+\.txt$', raw_path)
-    logger.warning("[fetch-cached] regex match: %s", m)
     if not m:
         raise HTTPException(400, "Ruta de archivo inválida o no permitida")
     file_path = m.group(0)
@@ -1222,6 +1559,237 @@ async def export_to_jira(body: JiraExportRequest, _user: str = Depends(verify_au
     issue_key = issue.get("key", "?")
     logger.info("Jira ticket creado: %s por %s", issue_key, _user)
     return {"issue_key": issue_key, "issue_url": f"{jira_base}/browse/{issue_key}", "id": issue.get("id")}
+
+
+# ─── Diff de Modernización — Sprint 2 ────────────────────────────────────────
+@app.get("/compare/{scan_id_a}/{scan_id_b}")
+async def compare_scans(scan_id_a: str, scan_id_b: str, _user: str = Depends(verify_auth)):
+    """Compara dos scans del mismo servidor y retorna un diff de hallazgos."""
+    conn, db_type = _get_conn()
+    if db_type == "sqlite":
+        conn.row_factory = sqlite3.Row
+    ph = _ph(db_type)
+    rows = conn.execute(
+        f"SELECT id, hostname, timestamp, bedrock_blueprint FROM scan_history WHERE id IN ({ph},{ph})",
+        (scan_id_a, scan_id_b)
+    ).fetchall()
+    conn.close()
+
+    if len(rows) < 2:
+        raise HTTPException(404, "Uno o ambos scans no encontrados")
+
+    scans = {dict(r)["id"]: dict(r) for r in rows}
+    a = scans.get(scan_id_a, {})
+    b = scans.get(scan_id_b, {})
+
+    def _extract_findings(scan: dict) -> set:
+        try:
+            bp = json.loads(scan.get("bedrock_blueprint") or "{}")
+        except Exception:
+            bp = {}
+        findings = set()
+        for f in bp.get("security_findings", []):
+            if isinstance(f, dict):
+                findings.add(f.get("component", f.get("description", ""))[:80])
+        for f in bp.get("risk_matrix", []):
+            if isinstance(f, dict):
+                findings.add(f.get("risk", "")[:80])
+        ca = bp.get("current_architecture", {})
+        for p in ca.get("pain_points", []):
+            findings.add(str(p)[:80])
+        return {x for x in findings if x}
+
+    findings_a = _extract_findings(a)
+    findings_b = _extract_findings(b)
+
+    resolved  = sorted(findings_a - findings_b)
+    new_items = sorted(findings_b - findings_a)
+    persisted = sorted(findings_a & findings_b)
+
+    total = max(len(findings_a), 1)
+    progress = round((len(resolved) / total) * 100)
+
+    return {
+        "scan_a": {"id": scan_id_a, "timestamp": a.get("timestamp", "")[:16], "hostname": a.get("hostname")},
+        "scan_b": {"id": scan_id_b, "timestamp": b.get("timestamp", "")[:16], "hostname": b.get("hostname")},
+        "resolved":        resolved,
+        "new":             new_items,
+        "persisted":       persisted,
+        "progress_score":  progress,
+        "findings_count_a": len(findings_a),
+        "findings_count_b": len(findings_b),
+    }
+
+# ─── Dashboard Portfolio — Sprint 3 ──────────────────────────────────────────
+@app.get("/dashboard/portfolio")
+async def portfolio_dashboard(_user: str = Depends(verify_auth)):
+    """Retorna métricas consolidadas por hostname para el dashboard ejecutivo multi-servidor."""
+    conn, db_type = _get_conn()
+    if db_type == "sqlite":
+        conn.row_factory = sqlite3.Row
+
+    # Obtener el último scan por hostname con coupling_score extraído
+    rows = conn.execute(
+        "SELECT id, hostname, timestamp, model_used, bedrock_blueprint "
+        "FROM scan_history WHERE bedrock_blueprint IS NOT NULL "
+        "ORDER BY timestamp DESC"
+    ).fetchall()
+    conn.close()
+
+    seen_hosts: dict = {}
+    for r in rows:
+        rd = dict(r)
+        host = rd.get("hostname", "unknown")
+        if host not in seen_hosts:
+            try:
+                bp = json.loads(rd.get("bedrock_blueprint") or "{}")
+            except Exception:
+                bp = {}
+            ca    = bp.get("current_architecture", {})
+            score = ca.get("coupling_score", 0)
+            risk  = "CRÍTICO" if score >= 8 else ("ALTO" if score >= 5 else "BAJO")
+            approach = ""
+            ms = bp.get("migration_strategy", {})
+            if isinstance(ms, dict):
+                approach = ms.get("approach", "")
+            method = rd.get("model_used", "")
+            seen_hosts[host] = {
+                "hostname":      host,
+                "last_scan_id":  rd["id"],
+                "last_scan":     rd.get("timestamp", "")[:16],
+                "coupling_score": score,
+                "risk_level":    risk,
+                "approach":      approach,
+                "model_used":    method,
+                "total_scans":   0,
+            }
+        seen_hosts[host]["total_scans"] += 1
+
+    servers = sorted(seen_hosts.values(), key=lambda x: x["coupling_score"], reverse=True)
+    return {
+        "total_servers": len(servers),
+        "critical":      sum(1 for s in servers if s["risk_level"] == "CRÍTICO"),
+        "high":          sum(1 for s in servers if s["risk_level"] == "ALTO"),
+        "low":           sum(1 for s in servers if s["risk_level"] == "BAJO"),
+        "servers":       servers
+    }
+
+# ─── Runbook Generator — Sprint 3 ────────────────────────────────────────────
+_RUNBOOK_TEMPLATES: dict = {
+    "disable_telnet": {
+        "title": "Deshabilitar Telnet",
+        "rhel":   "systemctl stop telnet.socket && systemctl disable telnet.socket && firewall-cmd --permanent --remove-port=23/tcp && firewall-cmd --reload",
+        "ubuntu": "systemctl stop inetd 2>/dev/null; update-rc.d inetd disable 2>/dev/null; ufw deny 23",
+        "aix":    "stopsrc -s telnetd && chkconfig telnetd off",
+    },
+    "patch_java": {
+        "title": "Actualizar Java a versión LTS soportada",
+        "rhel":   "yum install -y java-17-openjdk && alternatives --config java",
+        "ubuntu": "apt-get install -y openjdk-17-jdk && update-alternatives --config java",
+        "aix":    "# Descargar IBM JDK 17 desde ibm.com/support según arquitectura",
+    },
+    "disable_root_ssh": {
+        "title": "Deshabilitar login SSH de root",
+        "rhel":   "sed -i 's/^PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config && systemctl restart sshd",
+        "ubuntu": "sed -i 's/^PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config && systemctl restart sshd",
+        "aix":    "chsec -f /etc/security/user -s root -a rlogin=false",
+    },
+    "enable_firewall": {
+        "title": "Habilitar y configurar firewall",
+        "rhel":   "systemctl enable --now firewalld && firewall-cmd --set-default-zone=drop && firewall-cmd --permanent --add-service=ssh && firewall-cmd --reload",
+        "ubuntu": "ufw default deny incoming && ufw allow ssh && ufw enable",
+        "aix":    "# Configurar IP Filter (ipf) en AIX según documentación IBM",
+    },
+}
+
+def _detect_os_family(raw_inventory: str) -> str:
+    inv = raw_inventory.lower()
+    if "aix" in inv:        return "aix"
+    if "ubuntu" in inv:     return "ubuntu"
+    if "debian" in inv:     return "ubuntu"
+    return "rhel"  # RHEL / CentOS / Oracle Linux como default
+
+@app.get("/generate/runbook/{scan_id}")
+async def generate_runbook(scan_id: str, _user: str = Depends(verify_auth)):
+    """Genera un script bash ejecutable con los quick wins del análisis, adaptado al OS detectado."""
+    conn, db_type = _get_conn()
+    if db_type == "sqlite":
+        conn.row_factory = sqlite3.Row
+    ph = _ph(db_type)
+    row = conn.execute(
+        f"SELECT hostname, bedrock_blueprint, raw_inventory FROM scan_history WHERE id = {ph}",
+        (scan_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404, "Scan no encontrado")
+
+    rd  = dict(row)
+    try:
+        bp = json.loads(rd.get("bedrock_blueprint") or "{}")
+    except Exception:
+        bp = {}
+
+    os_family = _detect_os_family(rd.get("raw_inventory") or "")
+    hostname  = rd.get("hostname", "servidor")
+    quick_wins = bp.get("quick_wins", [])
+
+    lines = [
+        "#!/bin/bash",
+        "# ==========================================================",
+        f"# Runbook generado por Modernization Factory",
+        f"# Servidor: {hostname}      OS detectado: {os_family.upper()}",
+        f"# Generado: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        "# ADVERTENCIA: Revisar antes de ejecutar en producción.",
+        "# ==========================================================",
+        "set -euo pipefail",
+        "",
+        "echo '🏭 Modernization Factory — Runbook de Quick Wins'",
+        f"echo 'Servidor objetivo: {hostname}'",
+        "",
+    ]
+
+    # Agregar quick wins del análisis IA
+    for i, qw in enumerate(quick_wins[:10], 1):
+        if not isinstance(qw, dict):
+            continue
+        title  = qw.get("title", f"Quick Win #{i}")
+        desc   = qw.get("description", "")
+        effort = qw.get("effort", "")
+        owner  = qw.get("owner", "")
+        lines += [
+            f"# ── Quick Win #{i}: {title} ──",
+            f"# Esfuerzo: {effort}   Responsable: {owner}",
+            f"# {desc[:200]}",
+            f"echo '>> Ejecutando: {title}'",
+            "# TODO: Completar con comandos específicos del entorno",
+            "",
+        ]
+
+    # Agregar templates conocidos según OS
+    lines += [
+        "# ── Templates de hardening recomendados ──",
+        "",
+    ]
+    for key, tmpl in _RUNBOOK_TEMPLATES.items():
+        cmd = tmpl.get(os_family, tmpl.get("rhel", "# Sin comando para este OS"))
+        lines += [
+            f"# {tmpl['title']}",
+            f"# {cmd}",
+            "",
+        ]
+
+    lines += [
+        "echo '✅ Runbook completado. Verificar logs del sistema.'",
+    ]
+
+    script = "\n".join(lines)
+    hostname_safe = re.sub(r"[^a-z0-9]", "-", hostname.lower())
+    return Response(
+        content=script,
+        media_type="text/plain",
+        headers={"Content-Disposition": f"attachment; filename=runbook_{hostname_safe}_{scan_id[:8]}.sh"}
+    )
 
 
 # ─── Static Frontend ──────────────────────────────────────────────────────────

@@ -8,3 +8,4 @@ psycopg2-binary==2.9.11
 PyJWT==2.8.0
 fpdf2==2.7.9
 requests==2.31.0
+scikit-learn>=1.3
