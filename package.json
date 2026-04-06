@@ -1,0 +1,35 @@
+{
+  "name": "modernization-factory-portal",
+  "version": "2.0.0",
+  "description": "Enterprise platform for legacy system modernization analysis and AWS migration planning",
+  "main": "backend-node.js",
+  "type": "module",
+  "scripts": {
+    "start": "node backend-node.js",
+    "dev": "node --watch backend-node.js",
+    "lint": "eslint *.js lib/",
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "modernization",
+    "legacy-systems",
+    "cloud-migration",
+    "AWS",
+    "SRE",
+    "infrastructure-as-code"
+  ],
+  "author": "OTSOrchestrAI",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "express-rate-limit": "^7.1.5",
+    "ssh2": "^1.17.0"
+  },
+  "devDependencies": {
+    "eslint": "^8.50.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

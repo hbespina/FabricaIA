@@ -1,4 +1,10 @@
-fastapi==0.104.1
-uvicorn==0.24.0.post1
-boto3==1.29.0
-python-dotenv==1.0.0
+fastapi==0.110.0
+uvicorn==0.28.0
+boto3==1.34.60
+python-dotenv==1.0.1
+slowapi==0.1.9
+paramiko==3.4.0
+psycopg2-binary==2.9.11
+PyJWT==2.8.0
+fpdf2==2.7.9
+requests==2.31.0

@@ -1,20 +1,55 @@
 version: '3.8'
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: factory_postgres
+    environment:
+      POSTGRES_DB: factory_db
+      POSTGRES_USER: factory
+      POSTGRES_PASSWORD: factory_pass_2026
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U factory -d factory_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+
   backend:
-    build: ./server
-    container_name: factory_backend
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: factory_backend_prod
     ports:
       - "8000:8000"
     env_file:
-      - ./server/.env
+      - server/.env
+    environment:
+      - DATABASE_URL=postgresql://factory:factory_pass_2026@postgres:5432/factory_db
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     restart: always
 
   frontend:
-    build: .
-    container_name: factory_frontend
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: factory_frontend_prod
     ports:
       - "80:80"
+      - "443:443"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: always
+
+volumes:
+  postgres_data:

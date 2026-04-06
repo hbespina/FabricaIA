@@ -353,3 +353,71 @@ button.primary:hover {
         color: black;
     }
 }
+
+/* Architect Role & App Analysis Styles */
+.split-view {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 15px;
+}
+
+.code-pane {
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid var(--glass-border);
+    border-radius: 12px;
+    padding: 1rem;
+}
+
+.code-pane pre {
+    max-height: 400px;
+    font-size: 0.75rem;
+}
+
+.pattern-badge {
+    padding: 10px 15px;
+    border-radius: 12px;
+    font-weight: 600;
+    display: inline-block;
+    margin-bottom: 1rem;
+}
+
+.pattern-mono { background: linear-gradient(135deg, #ff416c 0%, #ff4b2b 100%); }
+.pattern-mvc { background: linear-gradient(135deg, #00d2ff 0%, #3a7bd5 100%); }
+.pattern-proc { background: linear-gradient(135deg, #f9d423 0%, #ff4b2b 100%); }
+
+.endpoint-list {
+    list-style: none;
+    padding: 0;
+}
+
+.endpoint-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 10px;
+    border-bottom: 1px solid var(--glass-border);
+    font-size: 0.85rem;
+}
+
+.endpoint-item:last-child {
+    border-bottom: none;
+}
+
+.refactor-btn {
+    background: var(--accent-blue);
+    border: none;
+    color: white;
+    padding: 5px 10px;
+    border-radius: 5px;
+    font-size: 0.7rem;
+    cursor: pointer;
+    transition: background 0.3s;
+}
+
+.refactor-btn:hover {
+    background: var(--accent-purple);
+}
+
+#app-analysis-results .glass-card {
+    border-top: 4px solid var(--accent-purple);
+}
+

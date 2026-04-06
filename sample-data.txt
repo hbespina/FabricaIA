@@ -1,0 +1,200 @@
+--- START CLOUD MODERNIZATION INVENTORY ---
+TIMESTAMP: 2026-03-30T10:30:00
+HOSTNAME: prod-app-server-01
+COLLECTOR_VERSION: 2.0
+
+--- OS RELEASE ---
+NAME="Red Hat Enterprise Linux"
+VERSION="8.5"
+ID="rhel"
+PRETTY_NAME="Red Hat Enterprise Linux 8.5"
+
+--- PROCESSES & RUNTIMES ---
+root      1234  0.5 12.3 5234876 1024000 ?  Ssl  10:15   2:34 java -Xmx4g -Xms2g -server -Dspring.profiles.active=prod -jar application.jar
+root      4567  1.2  8.5 3456789  892000 ?  Ss   09:45   5:12 /opt/oracle/product/19c/bin/ora_mon production
+oracle    5678  0.3  6.2 2234567  652000 ?  Ss   10:00   1:45 /opt/oracle/product/19c/bin/ora_dbwr production
+root      6789  0.1  3.4  1234567  356000 ?  Ss   09:30   0:56 /usr/sbin/httpd -DFOREGROUND
+apache    7890  0.0  0.5  567890   52000  ?  S    09:31   0:02 /usr/sbin/httpd -DFOREGROUND
+nifi      8901  2.1 18.5 6789012 1934000 ?  Ssl  08:00  15:34 java -Xmx6g -Xms4g -cp /opt/nifi/lib/* org.apache.nifi.NiFi
+
+--- LISTENING PORTS & SERVICES ---
+tcp        0      0 0.0.0.0:22              0.0.0.0:*               LISTEN      456/sshd
+tcp        0      0 127.0.0.1:5432          0.0.0.0:*               LISTEN      1234/postgres
+tcp        0      0 0.0.0.0:80              0.0.0.0:*               LISTEN      6789/httpd
+tcp        0      0 0.0.0.0:443             0.0.0.0:*               LISTEN      6789/httpd
+tcp        0      0 0.0.0.0:3306            0.0.0.0:*               LISTEN      2345/mysqld
+tcp        0      0 0.0.0.0:5672            0.0.0.0:*               LISTEN      3456/beam.smp
+tcp        0      0 0.0.0.0:6379            0.0.0.0:*               LISTEN      4567/redis-server
+tcp        0      0 127.0.0.1:1521          0.0.0.0:*               LISTEN      5678/ora_mon
+tcp        0      0 0.0.0.0:8080            0.0.0.0:*               LISTEN      1234/java
+tcp        0      0 0.0.0.0:8443            0.0.0.0:*               LISTEN      1234/java
+tcp        0      0 0.0.0.0:8161            0.0.0.0:*               LISTEN      8901/java
+tcp        0      0 0.0.0.0:9200            0.0.0.0:*               LISTEN      9012/elasticsearch
+
+--- JAVA/APPLICATION STACK ---
+JAVA_HOME: /usr/java/jdk-17.0.2
+java version "17.0.2" 2022-01-18 LTS
+Java(TM) SE Runtime Environment (build 17.0.2+8-LTS-56)
+Java HotSpot(TM) 64-Bit Server VM (build 17.0.2+8-LTS-56, mixed mode)
+TOMCAT_HOME: /opt/tomcat9
+JBOSS_HOME: /opt/wildfly-26
+
+--- NODE/PYTHON/PHP RUNTIME ---
+v18.12.1
+Python 3.9.13
+PHP 7.4.26 (cli) (built: Feb 27 2022)
+
+--- MAVEN DEPENDENCIES (pom.xml) ---
+MAVEN_PROJECT: /opt/app/pom.xml
+  <artifactId>spring-boot-starter-web</artifactId>
+  <version>2.7.10</version>
+  <artifactId>spring-boot-starter-data-jpa</artifactId>
+  <version>2.7.10</version>
+  <artifactId>spring-boot-starter-security</artifactId>
+  <version>2.7.10</version>
+  <artifactId>oracle-jdbc</artifactId>
+  <version>19.15</version>
+  <artifactId>axis2-core</artifactId>
+  <version>1.7.9</version>
+  <artifactId>nifi-api</artifactId>
+  <version>1.15.2</version>
+  <artifactId>kafka-clients</artifactId>
+  <version>3.1.0</version>
+  <artifactId>hibernate-core</artifactId>
+  <version>5.6.14.Final</version>
+  <artifactId>struts-core</artifactId>
+  <version>2.5.30</version>
+
+--- DATABASE CONNECTIONS & SCHEMAS ---
+DATABASE_CONNECTIONS_FOUND: 47
+jdbc:oracle:thin:@prod-db-01:1521:PROD
+jdbc:mysql://legacy-mysql-01:3306/reports
+jdbc:postgresql://data-warehouse:5432/analytics
+mongodb://mongo-cluster:27017/catalog
+
+--- NIFI_INTEGRATION ---
+NIFI_DETECTED: 1 instances
+NIFI_HOME: /opt/nifi-1.15.2
+NIFI_PROCESS: 1 running
+NIFI_CONFIG: /opt/nifi-1.15.2/conf/nifi.properties
+  nifi.web.http.port=8161
+  nifi.cluster.is.node=true
+  nifi.cluster.node.address=10.0.1.45
+NIFI_FLOWS_FOUND: 12
+  NIFI_FLOW: /opt/nifi-1.15.2/conf/flow.xml (45MB)
+  NIFI_FLOW: /opt/nifi-1.15.2/conf/flow.xml.gz (18MB)
+
+--- KAFKA_INTEGRATION ---
+KAFKA_DETECTED: 1 instances
+KAFKA_HOME: /opt/kafka-3.1.0
+KAFKA_PROCESS: 3 running
+KAFKA_CONFIG: /opt/kafka-3.1.0/config/server.properties
+  broker.id=101
+  zookeeper.connect=zk-01:2181,zk-02:2181,zk-03:2181
+  listeners=PLAINTEXT://10.0.1.45:9092
+
+--- APACHE_AIRFLOW_DETECTED ---
+AIRFLOW_DETECTED: 1 instances
+AIRFLOW_HOME: /opt/airflow
+AIRFLOW_PROCESS: 4 running (scheduler, webserver, worker-1, worker-2)
+
+--- RABBITMQ / MESSAGE BUSES ---
+RABBITMQ_RUNNING: YES
+ACTIVEMQ_DETECTED: 1 instances
+ACTIVEMQ_CONFIG: /opt/activemq/conf/activemq.xml
+  <transportConnector name="OpenWire" binding="tcp://0.0.0.0:61616"/>
+  <networkConnector uri="static:(tcp://10.0.2.50:61616)"/>
+
+--- ORACLE INTEGRATION ---
+ORACLE_INTEGRATIONS_FOUND: 8
+  /opt/oracle/odia/projects
+  /opt/oracle/osb/config
+  /opt/oracle/weblogic/domains
+ORACLE_LISTENERS: 2
+SQLPLUS_FOUND: /usr/bin/sqlplus
+
+--- CRITICAL CONFIG FILES ---
+CONFIG_FILES_FOUND: 12
+FILE: /opt/tomcat9/conf/web.xml
+  <servlet>
+    <servlet-name>SpringDispatcher</servlet-name>
+    <servlet-class>org.springframework.web.servlet.DispatcherServlet</servlet-class>
+  </servlet>
+  <connection-factory>
+    <datasource>jdbc:oracle:thin:@prod-db:1521:PROD</datasource>
+  </connection-factory>
+
+--- LEGACY TECHNOLOGIES SCAN ---
+LEGACY_JAR_COUNT: 342
+  commons-lang-2.6.jar
+  axis-1.4.jar
+  struts-1.3.10.jar
+  hibernate-3.6.10.Final.jar
+  spring-core-4.3.29.RELEASE.jar
+  wicket-core-8.5.0.jar
+  nifi-core-1.15.2.jar
+  kafka-clients-3.1.0.jar
+
+NIFI_LIBRARIES: 67
+  nifi-standard-processors-1.15.2.jar
+  nifi-hadoop-record-processors-1.15.2.jar
+  nifi-aws-processors-1.15.2.jar
+  nifi-jolt-transform-json-1.15.2.jar
+
+--- SOURCE CODE ANALYSIS ---
+JAVA_SRC_FILES: 1847
+PYTHON_SRC_FILES: 234
+JS_SRC_FILES: 567
+PHP_SRC_FILES: 89
+
+--- CYCLOMATIC_COMPLEXITY ---
+HIGH_COMPLEXITY: /opt/app/src/main/java/com/company/MainApp.java (34 branches)
+HIGH_COMPLEXITY: /opt/app/src/main/java/com/company/PaymentProcessor.java (28 branches)
+HIGH_COMPLEXITY: /opt/app/src/main/java/com/company/ReportGenerator.java (24 branches)
+
+--- LONG_METHOD_DETECTION ---
+LONG_METHOD: /opt/app/src/main/java/com/company/MainApp.java (lines 45-285)
+LONG_METHOD: /opt/app/src/main/java/com/company/DataTransformer.java (lines 120-340)
+
+--- LARGE_CLASS_DETECTION ---
+LARGE_CLASS: /opt/app/src/main/java/com/company/MainApp.java (2847 lines) - GOD CLASS
+LARGE_CLASS: /opt/app/src/main/java/com/company/LegacyProcessor.java (1245 lines)
+
+--- TEST_COVERAGE_ANALYSIS ---
+TEST_FILES: 412
+TOTAL: 2737
+Coverage Ratio: ~15%
+
+--- DEPENDENCY_ANALYSIS ---
+HIGH_COUPLING: /opt/app/src/main/java/com/company/MainApp.java (47 imports)
+HIGH_COUPLING: /opt/app/src/main/java/com/company/ServiceLocator.java (43 imports)
+
+--- CODE_SMELLS ---
+EMPTY_CATCH_BLOCKS: 23 files
+HARDCODED_CREDENTIALS: 7 files
+TODO_COMMENTS: 156
+
+--- SQL_INJECTION_RISK ---
+VULNERABLE_FILES: 12
+  /opt/app/src/main/java/com/company/QueryBuilder.java (executeQuery with string concatenation)
+  /opt/app/src/main/java/com/company/ReportEngine.java (SQL concat patterns)
+
+--- SECURITY ANALYSIS ---
+HARDCODED_SECRETS: 18
+  db.password=Oracle@2024
+  api.key=sk-prod-a1b2c3d4e5f6
+  jdbc.url=jdbc:oracle:thin:@prod-db:1521:PROD
+
+UNSAFE_DESERIALIZATION: 5 files
+  /opt/app/src/main/java/com/company/ObjectCache.java (readObject patterns)
+
+--- GIT REPOSITORIES ---
+GIT_REPO: /opt/app
+GIT_REPO: /opt/scripts
+
+--- PERFORMANCE BASELINE ---
+CPU_CORES: 16
+MEMORY_GB: 64
+DISK_USAGE: /dev/sda1: 89%
+
+--- END CLOUD MODERNIZATION INVENTORY ---
