@@ -23,7 +23,9 @@ import botocore.config
 import jwt as pyjwt
 import paramiko
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Security
+import xml.etree.ElementTree as ET
+import zipfile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, Security, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
@@ -157,8 +159,9 @@ _api_key_header = APIKeyHeader(name="X-API-KEY", auto_error=False)
 async def verify_auth(
     creds: Optional[HTTPAuthorizationCredentials] = Security(_bearer_scheme),
     api_key: Optional[str] = Security(_api_key_header),
+    token: Optional[str] = None
 ) -> str:
-    """Acepta JWT Bearer (frontend login) o X-API-KEY (Docker healthcheck / CLI)."""
+    """Acepta JWT Bearer (frontend login), X-API-KEY (Docker healthcheck), o ?token=... (SSE)."""
     if creds and creds.scheme.lower() == "bearer":
         try:
             payload = pyjwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
@@ -167,9 +170,21 @@ async def verify_auth(
             raise HTTPException(401, "Token expirado — vuelve a iniciar sesión")
         except pyjwt.InvalidTokenError:
             raise HTTPException(401, "Token inválido")
-    if api_key and api_key == os.getenv("API_KEY", "mf-api-key-2026"):
+    
+    # Check X-API-KEY or query parameter ?token
+    provided_key = api_key or token
+    # Also support JWT via query param for SSE from frontend auth
+    if token and len(token) > 50:
+        try:
+            payload = pyjwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            return payload["sub"]
+        except:
+            pass
+
+    if provided_key and provided_key == os.getenv("API_KEY", "mf-api-key-2026"):
         return "api_key_user"
-    raise HTTPException(401, "Autenticación requerida. Usa X-API-KEY o Bearer token.")
+        
+    raise HTTPException(401, "Autenticación requerida. Usa X-API-KEY, Bearer token, o ?token=...")
 
 # ─── Pydantic Models ──────────────────────────────────────────────────────────
 class LoginRequest(BaseModel):
@@ -356,17 +371,33 @@ def init_db():
             data_hash         TEXT
         )
     """)
+    
+    # Crear tabla de jobs asíncronos (V6)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS analysis_jobs (
+            id          TEXT PRIMARY KEY,
+            hostname    TEXT,
+            status      TEXT,
+            message     TEXT,
+            model_used  TEXT,
+            scan_id     TEXT,
+            ai_content  TEXT,
+            error       TEXT,
+            created_at  TEXT,
+            updated_at  TEXT
+        )
+    """)
 
     # Migracion: agregar columnas nuevas si la tabla ya existia sin ellas
     if db_type == "sqlite":
         existing = {row[1] for row in c.execute("PRAGMA table_info(scan_history)")}
-        for col, definition in [("model_used", "TEXT"), ("data_hash", "TEXT"), ("previous_scan_id", "TEXT")]:
+        for col, definition in [("model_used", "TEXT"), ("data_hash", "TEXT"), ("previous_scan_id", "TEXT"), ("embedding", "TEXT")]:
             if col not in existing:
                 c.execute(f"ALTER TABLE scan_history ADD COLUMN {col} {definition}")
                 logger.info("Migracion: columna '%s' agregada a scan_history", col)
     else:
         # PostgreSQL: usar ADD COLUMN IF NOT EXISTS
-        for col, definition in [("model_used", "TEXT"), ("data_hash", "TEXT"), ("previous_scan_id", "TEXT")]:
+        for col, definition in [("model_used", "TEXT"), ("data_hash", "TEXT"), ("previous_scan_id", "TEXT"), ("embedding", "TEXT")]:
             c.execute(f"ALTER TABLE scan_history ADD COLUMN IF NOT EXISTS {col} {definition}")
 
     conn.commit()
@@ -375,14 +406,26 @@ def init_db():
 
 init_db()
 
-def _save_scan(scan_id, hostname, raw_data, ai_response, model_used, data_hash, previous_scan_id=None):
+def _save_scan(scan_id, hostname, raw_data, ai_response, model_used, data_hash, previous_scan_id=None, embedding=None):
     conn, db_type = _get_conn()
     ph = _ph(db_type)
-    conn.execute(
-        f"INSERT INTO scan_history (id, hostname, timestamp, raw_inventory, bedrock_blueprint, model_used, data_hash, previous_scan_id) "
-        f"VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})",
-        (scan_id, hostname, datetime.now().isoformat(), raw_data, json.dumps(ai_response), model_used, data_hash, previous_scan_id)
-    )
+    emb_str = json.dumps(embedding) if embedding else None
+    
+    # Intenta insertar asumiendo que el esquema ya migró (incluyendo la nueva columna `embedding`)
+    try:
+        conn.execute(
+            f"INSERT INTO scan_history (id, hostname, timestamp, raw_inventory, bedrock_blueprint, model_used, data_hash, previous_scan_id, embedding) "
+            f"VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})",
+            (scan_id, hostname, datetime.now().isoformat(), raw_data, json.dumps(ai_response), model_used, data_hash, previous_scan_id, emb_str)
+        )
+    except Exception as e:
+        logger.error(f"Error insertando scan (schema desactualizado o error SQL): {e}")
+        # Callaba back to old insert without embedding in worst case scenarios before restart
+        conn.execute(
+            f"INSERT INTO scan_history (id, hostname, timestamp, raw_inventory, bedrock_blueprint, model_used, data_hash, previous_scan_id) "
+            f"VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})",
+            (scan_id, hostname, datetime.now().isoformat(), raw_data, json.dumps(ai_response), model_used, data_hash, previous_scan_id)
+        )
     conn.commit()
     conn.close()
 
@@ -398,6 +441,50 @@ def _find_cached_scan(data_hash: str):
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+# ─── DB Job Access Helpers (V6) ────────────────────────────────────────────────
+def _get_job(job_id: str):
+    if job_id in JOBS: return JOBS[job_id]  # Fallback to memory for collect jobs
+    conn, db_type = _get_conn()
+    if db_type == "sqlite": conn.row_factory = sqlite3.Row
+    ph = _ph(db_type)
+    row = conn.execute(f"SELECT * FROM analysis_jobs WHERE id = {ph}", (job_id,)).fetchone()
+    conn.close()
+    if not row: return None
+    jd = dict(row)
+    if jd.get("ai_content"): jd["ai_content"] = json.loads(jd["ai_content"])
+    return jd
+
+def _update_job_status(job_id: str, status: str, message: str, ai_content: dict = None, scan_id: str = None, model_used: str = None, error: str = None):
+    # Backward compatibility for in-memory
+    if job_id in JOBS:
+        JOBS[job_id]["status"] = status
+        JOBS[job_id]["message"] = message
+        if ai_content: JOBS[job_id]["ai_content"] = ai_content
+        if scan_id: JOBS[job_id]["scan_id"] = scan_id
+        if model_used: JOBS[job_id]["model_used"] = model_used
+        if error: JOBS[job_id]["error"] = error
+    
+    conn, db_type = _get_conn()
+    ph = _ph(db_type)
+    ai_str = json.dumps(ai_content) if ai_content else None
+    
+    # Upsert logic
+    row = conn.execute(f"SELECT id FROM analysis_jobs WHERE id = {ph}", (job_id,)).fetchone()
+    now = datetime.now().isoformat()
+    if row:
+        conn.execute(
+            f"UPDATE analysis_jobs SET status={ph}, message={ph}, ai_content={ph}, scan_id={ph}, model_used={ph}, error={ph}, updated_at={ph} WHERE id={ph}",
+            (status, message, ai_str, scan_id, model_used, error, now, job_id)
+        )
+    else:
+        conn.execute(
+            f"INSERT INTO analysis_jobs (id, status, message, ai_content, scan_id, model_used, error, created_at, updated_at) "
+            f"VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})",
+            (job_id, status, message, ai_str, scan_id, model_used, error, now, now)
+        )
+    conn.commit()
+    conn.close()
 
 def _find_scan_by_hostname(hostname: str, within_hours: int = 24):
     """
@@ -493,59 +580,82 @@ def _cache_key(raw_data: str) -> str:
     normalized = _normalize_inventory(raw_data)
     return hashlib.sha256(normalized.encode()).hexdigest()
 
-# ─── RAG — Recuperación por Similitud TF-IDF ─────────────────────────────────
+# ─── RAG — Recuperación por Similitud Semántica (Vectores) ───────────────────
+def _get_embedding(text: str) -> list[float]:
+    """Genera un vector para un texto dado usando amazon.titan-embed-text-v1."""
+    if not text.strip():
+        return []
+    try:
+        bedrock = _bedrock_client()
+        body = json.dumps({"inputText": text[:8000]})
+        response = bedrock.invoke_model(
+            body=body,
+            modelId="amazon.titan-embed-text-v1",
+            accept="application/json",
+            contentType="application/json"
+        )
+        response_body = json.loads(response.get('body').read())
+        return response_body.get('embedding', [])
+    except Exception as e:
+        logger.warning(f"Error al generar embedding: {e}")
+        return []
+
+def _cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
+    if not vec1 or not vec2 or len(vec1) != len(vec2):
+        return 0.0
+    dot = sum(a * b for a, b in zip(vec1, vec2))
+    norm1 = sum(a * a for a in vec1) ** 0.5
+    norm2 = sum(b * b for b in vec2) ** 0.5
+    if norm1 == 0 or norm2 == 0:
+        return 0.0
+    return dot / (norm1 * norm2)
+
 def _rag_retrieve(inventory_text: str, top_k: int = 3) -> str:
     """
-    Recupera los análisis más similares al inventario actual usando TF-IDF coseno.
-    Retorna un string listo para inyectar en el prompt como <RAG_CONTEXT>.
-    Sin dependencias externas pesadas: usa scikit-learn (TF-IDF + coseno).
+    Recupera los análisis más similares al inventario actual usando similitud coseno
+    sobre Semantic Embeddings previamente guardados.
     """
     try:
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        from sklearn.metrics.pairwise import cosine_similarity
-        import numpy as np
+        # 1. Vectorizar el texto de entrada
+        query_vector = _get_embedding(inventory_text)
+        if not query_vector:
+            return ""
 
         conn, db_type = _get_conn()
         if db_type == "sqlite":
             conn.row_factory = sqlite3.Row
+        
+        # 2. Recuperar escaneos anteriores que tengan embedding válido
         rows = conn.execute(
-            "SELECT id, hostname, bedrock_blueprint, raw_inventory FROM scan_history "
-            "WHERE bedrock_blueprint IS NOT NULL ORDER BY timestamp DESC LIMIT 80"
+            "SELECT id, hostname, bedrock_blueprint, embedding FROM scan_history "
+            "WHERE bedrock_blueprint IS NOT NULL AND embedding IS NOT NULL "
+            "ORDER BY timestamp DESC LIMIT 200"
         ).fetchall()
         conn.close()
 
-        if not rows or len(rows) < 2:
+        if not rows:
             return ""
 
-        docs = []
-        metas = []
+        # 3. Calcular similitudes
+        results = []
         for r in rows:
             rd = dict(r)
-            inv = (rd.get("raw_inventory") or "")[:8000]
-            if inv.strip():
-                docs.append(inv)
-                metas.append(rd)
-
-        if len(docs) < 2:
-            return ""
-
-        corpus = [inventory_text[:8000]] + docs
-        vec = TfidfVectorizer(
-            max_features=3000,
-            ngram_range=(1, 2),
-            sublinear_tf=True,
-            min_df=1
-        )
-        tfidf = vec.fit_transform(corpus)
-        sims = cosine_similarity(tfidf[0:1], tfidf[1:]).flatten()
-
-        top_idx = np.argsort(sims)[::-1][:top_k]
-        parts = []
-        for i in top_idx:
-            score = float(sims[i])
-            if score < 0.08:   # umbral mínimo de relevancia
+            try:
+                emb_str = rd.get("embedding")
+                if not emb_str: continue
+                db_vector = json.loads(emb_str)
+                score = _cosine_similarity(query_vector, db_vector)
+                if score >= 0.50:  # Umbral de similitud semántica aceptable
+                    results.append((score, rd))
+            except Exception:
                 continue
-            meta = metas[i]
+        
+        # 4. Ordenar y seleccionar Top K
+        results.sort(key=lambda x: x[0], reverse=True)
+        top_matches = results[:top_k]
+
+        parts = []
+        for score, meta in top_matches:
             try:
                 bp = json.loads(meta.get("bedrock_blueprint") or "{}")
             except Exception:
@@ -568,76 +678,247 @@ def _rag_retrieve(inventory_text: str, top_k: int = 3) -> str:
         if not parts:
             return ""
 
-        header = f"Los siguientes {len(parts)} análisis anteriores son técnicamente similares. Úsalos como contexto para ser más específico:"
+        header = f"Los siguientes {len(parts)} análisis anteriores comparten alta similitud semántica. Úsalos como contexto para tu estrategia:"
         return header + "\n\n" + "\n\n".join(parts)
 
-    except ImportError:
-        logger.warning("scikit-learn no instalado — RAG deshabilitado")
-        return ""
     except Exception as e:
-        logger.warning("RAG error: %s", e)
+        logger.warning("RAG Semantic error: %s", e)
         return ""
 
 # ─── Agentic Prompts ──────────────────────────────────────────────────────────
 _AGENT_SECURITY_PROMPT = """
-Eres un CISO senior y experto en seguridad cloud. Analiza el inventario dado y retorna ÚNICAMENTE JSON válido:
+Eres un CISO Senior especializado en seguridad de aplicaciones Java Enterprise y remediación de CVEs.
+
+REGLA CRÍTICA: Si encuentras CVEs con severidad CRITICO, el campo sprint1_mandatory DEBE listar
+las acciones de parcheo con el JAR exacto y la versión segura destino. El plan de migración
+DEPENDE de tu output para forzar esas tareas en Sprint 1.
+
+Retorna ÚNICAMENTE JSON válido:
 {{
   "security_findings": [
-    {{"sev": "CRITICO|ALTO|MEDIO", "component": "nombre real", "cve": "CVE-XXXX o N/A",
-      "description": "descripción técnica con versión exacta",
-      "mitigation": "comando o config exacta para remediarlo"}}
+    {{"sev": "CRITICO|ALTO|MEDIO", "component": "jar-version.jar", "cve": "CVE-XXXX-YYYY",
+      "cvss": 9.8,
+      "description": "descripción técnica del vector de ataque",
+      "mitigation": "mvn dependency:force-version -Dartifact=groupId:artifactId:VERSION_SEGURA",
+      "safe_version": "X.Y.Z"}}
   ],
-  "critical_ports": ["puerto:servicio expuesto"],
-  "eol_components": ["componente vX.Y — EoL desde YYYY"],
-  "attack_surface": "descripción de superficie de ataque en 2 oraciones"
+  "sprint1_mandatory": [
+    "Actualizar log4j-core 2.14.1 → 2.17.1 (CVE-2021-44228 CVSS 10.0) — DevSecOps — 0.5d",
+    "Deshabilitar JNDI lookup: -Dlog4j2.formatMsgNoLookups=true — DevOps — 0.25d"
+  ],
+  "critical_ports": ["1521:Oracle DB — expuesto sin TLS"],
+  "eol_components": ["Java 8 — EoL Oracle 2030, sin módulos, sin virtual threads"],
+  "attack_surface": "descripción de la superficie de ataque real basada en puertos y componentes detectados"
 }}
 """
 
 _AGENT_MIGRATION_PROMPT = """
-Eres un Principal Cloud Architect de AWS. Recibes un inventario de servidor legacy junto con hallazgos de seguridad previos.
-Retorna ÚNICAMENTE JSON válido con la estrategia de migración:
+Eres un Distinguished Cloud Architect Senior (AWS) especializado en modernización JEE → Spring Boot 3.x / Java 21.
+
+REGLA DE ORO: Si recibes hallazgos de seguridad con sprint1_mandatory, el Sprint 1 de tu plan
+DEBE comenzar con esas tareas de parcheo. No es opcional.
+
+TARGET DE MIGRACIÓN: Spring Boot 3.2+ con Java 21 (LTS). Usa Virtual Threads donde aplique.
+RUNTIME AWS TARGET: ECS Fargate (stateless) o EKS (orquestación compleja).
+
+Retorna ÚNICAMENTE JSON válido:
 {{
-  "migration_strategy": {{"approach": "lift-and-shift|re-architect|strangler-fig|hybrid",
-    "rationale": "por qué este enfoque dado el stack",
-    "total_weeks": 16, "phases": 4}},
+  "migration_strategy": {{
+    "approach": "strangler-fig|re-architect|repackage|lift-and-shift",
+    "rationale": "justificación técnica basada en patrones JEE detectados",
+    "target_runtime": "ECS Fargate|EKS|Lambda|Elastic Beanstalk",
+    "target_java": "Java 21 LTS",
+    "target_framework": "Spring Boot 3.2",
+    "total_weeks": 8,
+    "phases": 4
+  }},
   "sprints": {{
-    "sprint_0": ["TAREA [Rol] [Esfuerzo]: descripción concreta"],
-    "sprint_1": ["TAREA [Rol] [Esfuerzo]: descripción concreta"],
-    "sprint_2": ["TAREA [Rol] [Esfuerzo]: descripción concreta"],
-    "sprint_3": ["TAREA [Rol] [Esfuerzo]: descripción concreta"]
+    "sprint_0": [
+      "SEGURIDAD [DevSecOps][0.5d]: Actualizar CVEs críticos — [MANDATORIO del SecurityAgent]",
+      "INVENTARIO [Architect][1d]: Mapear EJBs detectados a Spring @Service equivalentes"
+    ],
+    "sprint_1": [
+      "CONTAINERIZACIÓN [DevOps][2d]: Crear Dockerfile multi-stage distroless + CI/CD pipeline",
+      "REFACTOR [Dev][3d]: Transformar Servlets → @RestController con Spring Boot 3.x"
+    ],
+    "sprint_2": [
+      "PERSISTENCIA [Dev][3d]: Migrar SQL hardcodeado a Spring Data JPA repositories",
+      "CONFIG [DevOps][1d]: Externalizar JNDI/JDBC → AWS Secrets Manager + SSM Parameter Store"
+    ],
+    "sprint_3": [
+      "IAC [DevOps][2d]: Desplegar RDS Aurora + ECS Fargate con Terraform",
+      "OBSERVABILIDAD [SRE][2d]: CloudWatch + X-Ray + health endpoints /actuator/health"
+    ]
   }},
   "quick_wins": [
-    {{"title": "acción concreta", "description": "qué hacer exactamente",
-      "effort": "X días", "risk_reduction": "CVE o riesgo eliminado", "owner": "DevSecOps|SysAdmin|Dev"}}
+    {{"title": "acción concreta con clase o JAR real", "description": "exactamente qué hacer",
+      "effort": "Xd", "risk_reduction": "CVE-XXXX eliminado o riesgo reducido", "owner": "DevSecOps|Dev|DevOps"}}
   ],
   "risk_matrix": [
-    {{"risk": "nombre con componente real", "cve": "CVE o N/A",
+    {{"risk": "componente real con versión", "cve": "CVE-XXXX o N/A",
       "probability": "Alta|Media|Baja", "impact": "Crítico|Alto|Medio",
-      "mitigation": "acción concreta"}}
+      "mitigation": "acción concreta con herramienta o comando"}}
   ]
 }}
 """
 
-_AGENT_CODE_PROMPT = """
-Eres un Staff Engineer experto en refactoring de aplicaciones legacy hacia contenedores.
+_AGENT_CLOUDNATIVE_PROMPT = """
+Actúas como Principal Modernization Architect y SRE Lead.
+Tu misión: transformar aplicaciones Legacy JEE en microservicios Cloud-Native sobre AWS.
+
+CHAIN OF THOUGHT — razona internamente antes de generar:
+1. ¿Stateless o stateful? Si stateful (HttpSession/EJB Stateful): externalizar a ElastiCache
+2. ¿Java version compilada? Java 8 -> build eclipse-temurin:21-jdk-alpine + runtime gcr.io/distroless/java21-debian12
+3. ¿DB detectada en inventario? -> incluir en LocalStack, docker-compose, Terraform RDS Aurora
+4. ¿JNDI/filesystem paths? -> externalizar a AWS Secrets Manager + SSM Parameter Store
+5. ¿Maven o Gradle? -> adaptar stage build del Dockerfile
+
+OBJETIVO: Artefactos 100% funcionales con datos REALES del inventario — cero placeholders genéricos.
 Retorna ÚNICAMENTE JSON válido:
 {{
-  "agent_analysis": "Análisis técnico en 4+ párrafos: stack detectado, vulnerabilidades, deuda técnica, estrategia de containerización recomendada",
+  "twelve_factor_violations": [
+    {{"factor": "III - Config", "violation": "descripción con nombre de archivo/clase real",
+      "fix": "acción concreta con servicio AWS específico"}}
+  ],
+
+  "blocking_issues": [
+    {{"issue": "bloqueador con componente real del inventario",
+      "severity": "CRITICO|ALTO|MEDIO",
+      "resolution": "cómo resolverlo con herramienta específica antes de containerizar"}}
+  ],
+
+  "to_be_diagram": "flowchart TD\n  Internet([Internet])-->ALB[ALB - Application Load Balancer]\n  ALB-->ECS[ECS Fargate - NOMBRE-APP]\n  ECS-->SM[Secrets Manager\nDB credentials]\n  ECS-->RDS[(RDS Aurora Serverless\nPostgreSQL 15)]\n  ECS-->CW[CloudWatch + X-Ray]\n  subgraph VPC\n    subgraph Public[Public Subnet]\n      ALB\n    end\n    subgraph Private[Private Subnet]\n      ECS\n      RDS\n    end\n  end",
+
+  "dockerfile": "# Stage 1: Build JDK 21\nFROM eclipse-temurin:21-jdk-alpine AS build\nWORKDIR /app\nCOPY pom.xml .\nRUN mvn dependency:go-offline -q\nCOPY src ./src\nRUN mvn package -DskipTests -q\n\n# Stage 2: Runtime Distroless (sin shell, sin root)\nFROM gcr.io/distroless/java21-debian12\nWORKDIR /app\nCOPY --from=build /app/target/NOMBRE-APP.war /app/app.war\nEXPOSE 8080\nENTRYPOINT [\"java\",\"-Xmx512m\",\"-XX:+UseContainerSupport\",\"-XX:MaxRAMPercentage=75.0\",\"-jar\",\"/app/app.war\"]",
+
+  "docker_compose": "version: '3.9'\nservices:\n  app:\n    build: .\n    ports:\n      - '8080:8080'\n    environment:\n      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/appdb\n      SPRING_DATASOURCE_USERNAME: appuser\n      SPRING_DATASOURCE_PASSWORD: localpass\n    depends_on:\n      db:\n        condition: service_healthy\n  db:\n    image: postgres:15-alpine\n    environment:\n      POSTGRES_DB: appdb\n      POSTGRES_USER: appuser\n      POSTGRES_PASSWORD: localpass\n    healthcheck:\n      test: [CMD, pg_isready, -U, appuser]\n      interval: 5s\n      retries: 5",
+
+  "localstack_compose": "# LocalStack — emulación AWS local para desarrollo offline\nversion: '3.9'\nservices:\n  localstack:\n    image: localstack/localstack:3.0\n    ports:\n      - '4566:4566'\n    environment:\n      SERVICES: s3,secretsmanager,sqs,ssm\n      DEFAULT_REGION: us-east-1\n      PERSISTENCE: 1\n    volumes:\n      - ./localstack-data:/var/lib/localstack\n  app:\n    build: .\n    ports:\n      - '8080:8080'\n    environment:\n      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/appdb\n      AWS_ACCESS_KEY_ID: test\n      AWS_SECRET_ACCESS_KEY: test\n      AWS_REGION: us-east-1\n      SPRING_CLOUD_AWS_ENDPOINT: http://localstack:4566\n    depends_on:\n      - localstack\n      - db\n  db:\n    image: postgres:15-alpine\n    environment:\n      POSTGRES_DB: appdb\n      POSTGRES_USER: appuser\n      POSTGRES_PASSWORD: localpass",
+
+  "k8s_deployment": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: NOMBRE-REAL\nspec:\n  replicas: 2\n  selector:\n    matchLabels:\n      app: NOMBRE-REAL\n  template:\n    metadata:\n      labels:\n        app: NOMBRE-REAL\n    spec:\n      securityContext:\n        runAsNonRoot: true\n        runAsUser: 65532\n      containers:\n      - name: app\n        image: ACCOUNT.dkr.ecr.REGION.amazonaws.com/NOMBRE-REAL:latest\n        ports:\n        - containerPort: 8080\n        env:\n        - name: SPRING_DATASOURCE_URL\n          valueFrom:\n            secretKeyRef:\n              name: NOMBRE-REAL-secrets\n              key: db-url\n        resources:\n          requests: {{memory: 256Mi, cpu: 250m}}\n          limits: {{memory: 512Mi, cpu: 500m}}\n        livenessProbe:\n          httpGet: {{path: /actuator/health/liveness, port: 8080}}\n          initialDelaySeconds: 30\n          periodSeconds: 10\n        readinessProbe:\n          httpGet: {{path: /actuator/health/readiness, port: 8080}}\n          initialDelaySeconds: 20",
+
+  "k8s_service": "apiVersion: v1\nkind: Service\nmetadata:\n  name: NOMBRE-REAL-svc\nspec:\n  selector:\n    app: NOMBRE-REAL\n  ports:\n  - protocol: TCP\n    port: 80\n    targetPort: 8080\n  type: ClusterIP",
+
+  "k8s_hpa": "apiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: NOMBRE-REAL-hpa\nspec:\n  scaleTargetRef:\n    apiVersion: apps/v1\n    kind: Deployment\n    name: NOMBRE-REAL\n  minReplicas: 2\n  maxReplicas: 10\n  metrics:\n  - type: Resource\n    resource:\n      name: cpu\n      target: {{type: Utilization, averageUtilization: 70}}",
+
+  "terraform_managed_services": "# Terraform — VPC + ALB + ECS Fargate + RDS Aurora Serverless v2\nresource \"aws_vpc\" \"main\" {{\n  cidr_block = \"10.0.0.0/16\"\n  enable_dns_hostnames = true\n}}\n\nresource \"aws_lb\" \"alb\" {{\n  name = \"NOMBRE-REAL-alb\"\n  internal = false\n  load_balancer_type = \"application\"\n  security_groups = [aws_security_group.alb_sg.id]\n  subnets = aws_subnet.public[*].id\n}}\n\nresource \"aws_lb_target_group\" \"app\" {{\n  name = \"NOMBRE-REAL-tg\"\n  port = 8080\n  protocol = \"HTTP\"\n  vpc_id = aws_vpc.main.id\n  target_type = \"ip\"\n  health_check {{path = \"/actuator/health\"}}\n}}\n\nresource \"aws_rds_cluster\" \"aurora\" {{\n  cluster_identifier = \"NOMBRE-REAL-aurora\"\n  engine = \"aurora-postgresql\"\n  engine_version = \"15.4\"\n  database_name = \"appdb\"\n  master_username = var.db_user\n  master_password = var.db_password\n  serverlessv2_scaling_configuration {{\n    min_capacity = 0.5\n    max_capacity = 4.0\n  }}\n  deletion_protection = true\n}}\n\nresource \"aws_ecs_cluster\" \"main\" {{\n  name = \"NOMBRE-REAL-cluster\"\n  setting {{name=\"containerInsights\" value=\"enabled\"}}\n}}\n\nresource \"aws_ecs_task_definition\" \"app\" {{\n  family = \"NOMBRE-REAL\"\n  requires_compatibilities = [\"FARGATE\"]\n  network_mode = \"awsvpc\"\n  cpu = 512\n  memory = 1024\n  container_definitions = jsonencode([{{\n    name=\"app\", image=\"${{var.ecr_repo}}:latest\"\n    portMappings=[{{containerPort=8080}}]\n    secrets=[{{name=\"SPRING_DATASOURCE_URL\",valueFrom=var.db_secret_arn}}]\n    logConfiguration={{logDriver=\"awslogs\",options={{awslogs-group=\"/ecs/NOMBRE-REAL\",awslogs-region=var.aws_region,awslogs-stream-prefix=\"ecs\"}}}}\n  }}])\n}}",
+
+  "sre_runbook": [
+    {{"title": "Deployment Rollback",
+      "trigger": "Readiness probe falla tras deploy",
+      "steps": ["kubectl rollout undo deployment/NOMBRE-REAL", "kubectl logs -l app=NOMBRE-REAL --tail=100", "Revisar CloudWatch /ecs/NOMBRE-REAL"]}},
+    {{"title": "Alta Latencia p99 > 2s",
+      "trigger": "CloudWatch alarm TargetResponseTime > 2",
+      "steps": ["kubectl top pods -l app=NOMBRE-REAL", "kubectl scale deployment/NOMBRE-REAL --replicas=5", "RDS Performance Insights: revisar slow queries"]}},
+    {{"title": "OOMKilled",
+      "trigger": "kubectl describe pod muestra OOMKilled",
+      "steps": ["Aumentar memory limit a 768Mi en Deployment", "Verificar heap: -Xmx debe ser 75% del container limit", "jcmd 1 VM.native_memory para buscar leaks"]}}
+  ],
+
+  "refactored_snippets": [
+    {{
+      "class": "nombre.completo.ClaseReal del inventario",
+      "issue": "antipatrón concreto que bloquea containerización",
+      "before": "código JEE legacy (<10 líneas)",
+      "after": "código Spring Boot 3.2 + Java 21 (<10 líneas)",
+      "why": "razón técnica para containerizar"
+    }}
+  ],
+
+  "deployment_commands": [
+    "docker build -t NOMBRE-REAL:$(git rev-parse --short HEAD) .",
+    "aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REPO",
+    "docker push $ECR_REPO/NOMBRE-REAL:$(git rev-parse --short HEAD)",
+    "terraform init && terraform apply -auto-approve",
+    "docker-compose -f docker-compose.localstack.yml up -d && curl http://localhost:8080/actuator/health"
+  ],
+
+  "healthcheck_config": {{
+    "liveness_probe": "GET /actuator/health/liveness — port 8080 — initialDelaySeconds 30 — periodSeconds 10 — failureThreshold 3",
+    "readiness_probe": "GET /actuator/health/readiness — port 8080 — initialDelaySeconds 20 — failureThreshold 5",
+    "startup_probe": "GET /actuator/health — port 8080 — failureThreshold 30 — periodSeconds 10"
+  }}
+}}
+
+REGLAS CRÍTICAS:
+- Dockerfile: runtime DEBE ser gcr.io/distroless/java21-debian12 — NO alpine en runtime
+- localstack_compose: DEBE emular los servicios AWS reales detectados en la app
+- to_be_diagram: Mermaid válido mostrando VPC/ALB/ECS/RDS/Secrets Manager con nombre real
+- terraform_managed_services: DEBE incluir VPC + ALB + ECS Fargate + RDS Aurora Serverless v2
+- sre_runbook: 3 runbooks operativos para los escenarios más probables post-deploy
+- Todos los recursos: usar el nombre real del artefacto del inventario
+"""
+
+_AGENT_CODE_PROMPT = """
+Eres un Staff Engineer Senior especializado en refactoring de aplicaciones JEE hacia Spring Boot 3.x / Java 21.
+TARGET: Spring Boot 3.2+, Java 21 LTS, Jakarta EE 10 (javax.* → jakarta.*).
+
+Retorna ÚNICAMENTE JSON válido:
+{{
+  "agent_analysis": "Análisis técnico en 4+ párrafos: (1) stack detectado con versiones, (2) deuda técnica específica por patrón JEE, (3) impacto del acoplamiento en containerización, (4) ruta concreta de refactoring con clases reales",
   "code_remediation": [
-    {{"file": "ruta/real/archivo.ext", "issue": "problema técnico preciso",
-      "action": "cambio exacto requerido",
-      "before": "fragmento actual (< 5 líneas)",
-      "after": "fragmento corregido (< 5 líneas)",
-      "effort": "X horas", "priority": "P1-Crítico|P2-Alto|P3-Medio",
-      "benefit": "riesgo que elimina"}}
+    {{"file": "com.empresa.ClaseReal",
+      "issue": "antipatrón específico detectado en bytecode",
+      "action": "cambio exacto requerido para Spring Boot 3.x",
+      "before": "fragmento JEE legacy (< 6 líneas)",
+      "after": "fragmento Spring Boot 3.x + Java 21 (< 6 líneas)",
+      "effort": "Xh", "priority": "P1-Crítico|P2-Alto|P3-Medio",
+      "benefit": "qué riesgo o deuda elimina"}}
   ],
   "current_architecture": {{
     "coupling_score": 8,
-    "coupling_analysis": "descripción del acoplamiento con componentes reales",
-    "pain_points": ["SPOF real con impacto concreto"]
+    "coupling_analysis": "descripción del acoplamiento con nombres de componentes reales del inventario",
+    "pain_points": ["SPOF real con impacto concreto en containerización"]
   }}
 }}
-Máximo 3 ítems en code_remediation. Usa fragmentos before/after cortos.
+REGLA: Usa clases REALES del [BYTECODE_DATA]. Máximo 4 ítems en code_remediation.
+Migración javax.* → jakarta.*: en Spring Boot 3.x el namespace cambió completamente.
+"""
+
+_AGENT_BUSINESS_PROMPT = """
+Eres un Cloud FinOps Architect Senior. Recibes un inventario de servidor/aplicación legacy y calculas
+el análisis financiero comparativo: costo de mantener legacy vs migrar a AWS.
+
+Usa los datos del inventario para personalizar los cálculos — no uses números genéricos.
+Retorna ÚNICAMENTE JSON válido:
+{{
+  "risk_score": 8.5,
+  "risk_rationale": "por qué ese score basado en CVEs, EoL y acoplamiento detectados",
+
+  "tco_legacy": {{
+    "annual_licensing": 45000,
+    "annual_labor_maintenance": 80000,
+    "annual_security_incidents_risk": 120000,
+    "annual_downtime_cost": 15000,
+    "total_annual": 260000,
+    "five_year_total": 1300000
+  }},
+
+  "tco_aws": {{
+    "ecs_fargate_monthly": 180,
+    "rds_aurora_serverless_monthly": 95,
+    "secrets_manager_monthly": 10,
+    "cloudwatch_monthly": 25,
+    "total_monthly": 310,
+    "total_annual": 3720,
+    "migration_one_time_cost": 85000,
+    "five_year_total": 103600
+  }},
+
+  "roi": {{
+    "annual_saving": 256280,
+    "five_year_saving": 1196400,
+    "payback_months": 4,
+    "roi_pct": 1157
+  }},
+
+  "c_suite_summary": "2-3 oraciones para el CEO/CTO: riesgo actual, ahorro proyectado y recomendación de acción inmediata",
+
+  "cost_drivers": [
+    {{"driver": "CVE-2021-44228 Log4Shell sin parchear", "annual_risk_exposure": 200000,
+      "note": "costo estimado de un breach según IBM Cost of Data Breach 2023"}}
+  ]
+}}
 """
 
 # ─── Background Job (Bedrock Async — Agentic + RAG) ─────────────────────────
@@ -660,8 +941,8 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
     3. Fusiona resultados en el mismo formato JSON que usaba el sistema monolítico
     4. Fallback: si los agentes fallan, usa el prompt monolítico original
     """
-    JOBS[job_id]["status"] = "running"
-    JOBS[job_id]["message"] = "Recuperando contexto RAG..."
+    # Iniciar estado en DB
+    _update_job_status(job_id, "running", "Recuperando contexto RAG...")
 
     inventory = raw_data[:MAX_CHARS] + ("\n...[TRUNCADO]..." if len(raw_data) > MAX_CHARS else "")
     knowledge  = load_knowledge()
@@ -681,26 +962,65 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
     last_error  = None
 
     # ── Intento 1: 3 agentes en paralelo ─────────────────────────────────────
-    JOBS[job_id]["message"] = f"Ejecutando 3 agentes en paralelo ({mlabel})..."
+    _update_job_status(job_id, "running", "Ejecutando 3 agentes en paralelo...")
     logger.info("[Job %s] Iniciando análisis agéntico paralelo en %s", job_id[:8], mid)
+
+    # Detectar si el inventario proviene de un artefacto Java
+    is_java_artifact = raw_data.lstrip().startswith("ARTIFACT_NAME:") or "ARTIFACT_TYPE:" in raw_data[:300]
 
     sec_result  = {}
     mig_result  = {}
     code_result = {}
+    java_result = {}
+    cn_result   = {}   # CloudNative agent
+    biz_result  = {}   # Business/FinOps agent
     agents_ok   = False
 
     try:
-        inv_msg = f"Inventario del servidor a analizar:\n{inventory}"
+        # ── Estructurar el mensaje con secciones etiquetadas (mejor comprensión por agentes)
+        def _build_structured_msg(inv: str) -> str:
+            sections = {"BYTECODE_DATA": [], "DEPENDENCIES": [], "INFRA_AS_IS": [], "OTHER": []}
+            current = "INFRA_AS_IS"
+            for line in inv.splitlines():
+                ls = line.strip()
+                if any(k in ls for k in ("=== CLASES", "=== RESUMEN DE CLASES", "=== ANTIPATRONES", "=== SQL")):
+                    current = "BYTECODE_DATA"
+                elif any(k in ls for k in ("=== DEPENDENCIAS", "=== CVEs DETECTADOS")):
+                    current = "DEPENDENCIES"
+                elif ls.startswith("==="):
+                    current = "INFRA_AS_IS"
+                sections[current].append(line)
+            parts = []
+            if sections["INFRA_AS_IS"]:
+                parts.append("[INFRA_AS_IS]\n" + "\n".join(sections["INFRA_AS_IS"]))
+            if sections["DEPENDENCIES"]:
+                parts.append("[DEPENDENCIES]\n" + "\n".join(sections["DEPENDENCIES"]))
+            if sections["BYTECODE_DATA"]:
+                parts.append("[BYTECODE_DATA]\n" + "\n".join(sections["BYTECODE_DATA"]))
+            if sections["OTHER"]:
+                parts.append("[OTHER]\n" + "\n".join(sections["OTHER"]))
+            # BUSINESS_GOALS — siempre presente como contexto de negocio
+            parts.append(
+                "[BUSINESS_GOALS]\n"
+                "- Maximizar ROI: reducir TCO en >70% migrando a managed services (ECS Fargate, RDS Aurora Serverless)\n"
+                "- Eliminar deuda técnica crítica: parchear todos los CVEs CRITICO en Sprint 1\n"
+                "- Portabilidad: la app debe correr en contenedor sin dependencias del OS host\n"
+                "- Observabilidad: CloudWatch + X-Ray + /actuator/health desde el día 1 en producción\n"
+                "- Developer Experience: el equipo debe poder probar localmente sin conexión a AWS (LocalStack)"
+            )
+            return "\n\n".join(parts) if parts else inv
+
+        structured_inv = _build_structured_msg(inventory)
+        inv_msg = f"Inventario técnico estructurado:\n\n{structured_inv}"
 
         def run_security():
             return _call_agent(bedrock, mid, 2048,
                                _common_ctx + _AGENT_SECURITY_PROMPT, inv_msg)
 
         def run_migration():
-            # Migration agent recibe hallazgos de seguridad si están disponibles
             ctx = inv_msg
             if sec_result:
-                ctx += f"\n\nHallazgos de seguridad detectados:\n{json.dumps(sec_result, ensure_ascii=False)[:2000]}"
+                ctx += f"\n\n[SECURITY_FINDINGS — Sprint 1 mandatory tasks incluídas]\n{json.dumps(sec_result, ensure_ascii=False)[:2000]}"
             return _call_agent(bedrock, mid, 3072,
                                _common_ctx + _AGENT_MIGRATION_PROMPT, ctx)
 
@@ -708,28 +1028,57 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
             return _call_agent(bedrock, mid, 2048,
                                _common_ctx + _AGENT_CODE_PROMPT, inv_msg)
 
-        # Etapa 1a: Security + Code en paralelo (no dependen entre sí)
-        with ThreadPoolExecutor(max_workers=2) as ex:
+        def run_java():
+            return _call_agent(bedrock, mid, 4096,
+                               _common_ctx + _AGENT_JAVA_PROMPT, inv_msg)
+
+        def run_cloudnative():
+            return _call_agent(bedrock, mid, 4096,
+                               _common_ctx + _AGENT_CLOUDNATIVE_PROMPT, inv_msg)
+
+        def run_business():
+            return _call_agent(bedrock, mid, 2048,
+                               _common_ctx + _AGENT_BUSINESS_PROMPT, inv_msg)
+
+        # Etapa 1a: Security + Code + Business en paralelo (+ Java + CloudNative si es artefacto)
+        n_agents = 6 if is_java_artifact else 4
+        _update_job_status(job_id, "running", f"Ejecutando {n_agents} agentes especializados en paralelo...")
+
+        with ThreadPoolExecutor(max_workers=4) as ex:
             f_sec  = ex.submit(run_security)
             f_code = ex.submit(run_code)
-            for fut in as_completed([f_sec, f_code]):
+            f_biz  = ex.submit(run_business)
+            f_java = ex.submit(run_java)        if is_java_artifact else None
+            f_cn   = ex.submit(run_cloudnative) if is_java_artifact else None
+
+            futures_map = {
+                f_sec:  ("sec",  sec_result),
+                f_code: ("code", code_result),
+                f_biz:  ("biz",  biz_result),
+            }
+            if f_java: futures_map[f_java] = ("java",        java_result)
+            if f_cn:   futures_map[f_cn]   = ("cloudnative", cn_result)
+
+            for fut in as_completed(futures_map):
+                label_key, target = futures_map[fut]
                 try:
                     res = fut.result()
-                    if fut is f_sec:
-                        sec_result.update(res)
-                    else:
-                        code_result.update(res)
+                    target.update(res)
                 except Exception as e:
-                    logger.warning("[Job %s] Agente falló: %s", job_id[:8], e)
+                    logger.warning("[Job %s] Agente '%s' falló: %s", job_id[:8], label_key, e)
+
+        # Status después del bloque (fuera del ThreadPoolExecutor para evitar bloqueos DB)
+        _update_job_status(job_id, "running",
+                           f"Security/Code{'/ Java' if is_java_artifact else ''} completados...")
 
         # Etapa 1b: Migration (usa sec_result si está disponible)
-        JOBS[job_id]["message"] = "Agente Migration planificando sprints..."
+        _update_job_status(job_id, "running", "Agente Migration planificando sprints...")
         try:
             mig_result = run_migration()
         except Exception as e:
             logger.warning("[Job %s] MigrationAgent falló: %s", job_id[:8], e)
 
-        agents_ok = bool(sec_result or mig_result or code_result)
+        agents_ok = bool(sec_result or mig_result or code_result or java_result)
 
     except Exception as e:
         last_error = str(e)
@@ -737,41 +1086,77 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
 
     # ── Fusión de resultados agénticos ───────────────────────────────────────
     if agents_ok:
-        # Construir executive_summary desde los hallazgos de seguridad
+        # Construir executive_summary — Java tiene prioridad si es artefacto
         top_findings = sec_result.get("security_findings", [])
-        attack  = sec_result.get("attack_surface", "")
+        attack   = sec_result.get("attack_surface", "")
         eol_list = sec_result.get("eol_components", [])
-        exec_summary = (
-            f"Sistema analizado con {len(top_findings)} hallazgos de seguridad. "
-            + (f"Superficie de ataque: {attack} " if attack else "")
-            + (f"Componentes EoL: {', '.join(eol_list[:3])}." if eol_list else "")
-        ) or code_result.get("agent_analysis", "")[:300]
+        if is_java_artifact and java_result.get("executive_summary"):
+            exec_summary = java_result["executive_summary"]
+        else:
+            exec_summary = (
+                f"Sistema analizado con {len(top_findings)} hallazgos de seguridad. "
+                + (f"Superficie de ataque: {attack} " if attack else "")
+                + (f"Componentes EoL: {', '.join(eol_list[:3])}." if eol_list else "")
+            ) or code_result.get("agent_analysis", "")[:300]
 
         ai_response = {
             "executive_summary":  exec_summary,
-            "agent_analysis":     code_result.get("agent_analysis", ""),
-            "migration_strategy": mig_result.get("migration_strategy", {}),
-            "sprints":            mig_result.get("sprints", {}),
-            "quick_wins":         mig_result.get("quick_wins", []),
-            "risk_matrix":        mig_result.get("risk_matrix", []),
-            "code_remediation":   code_result.get("code_remediation", []),
+            "agent_analysis":     java_result.get("agent_analysis") or code_result.get("agent_analysis", ""),
+            "migration_strategy": java_result.get("migration_strategy") or mig_result.get("migration_strategy", {}),
+            "sprints":            java_result.get("sprints") or mig_result.get("sprints", {}),
+            "quick_wins":         java_result.get("quick_wins") or mig_result.get("quick_wins", []),
+            "risk_matrix":        java_result.get("risk_matrix") or mig_result.get("risk_matrix", []),
+            "code_remediation":   java_result.get("code_remediation") or code_result.get("code_remediation", []),
             "current_architecture": code_result.get("current_architecture", {}),
             # Metadatos extra de los agentes
             "security_findings":   sec_result.get("security_findings", []),
             "critical_ports":      sec_result.get("critical_ports", []),
             "eol_components":      sec_result.get("eol_components", []),
-            "_analysis_method":    "agentic_parallel",
+            # Datos específicos Java (solo cuando aplica)
+            **({"java_findings":       java_result.get("java_findings", []),
+                "dependency_analysis": java_result.get("dependency_analysis", {}),
+                "containerization":    java_result.get("containerization", {}),
+                # CloudNative agent — artefactos de migración listos para desplegar
+                "cloudnative": {
+                    "twelve_factor_violations":  cn_result.get("twelve_factor_violations", []),
+                    "blocking_issues":            cn_result.get("blocking_issues", []),
+                    "dockerfile":                 cn_result.get("dockerfile", ""),
+                    "docker_compose":             cn_result.get("docker_compose", ""),
+                    "k8s_deployment":             cn_result.get("k8s_deployment", ""),
+                    "k8s_service":                cn_result.get("k8s_service", ""),
+                    "k8s_hpa":                    cn_result.get("k8s_hpa", ""),
+                    "terraform_managed_services": cn_result.get("terraform_managed_services", ""),
+                    "refactored_snippets":        cn_result.get("refactored_snippets", []),
+                    "deployment_commands":        cn_result.get("deployment_commands", []),
+                    "healthcheck_config":         cn_result.get("healthcheck_config", {}),
+                    "to_be_diagram":              cn_result.get("to_be_diagram", ""),
+                    "localstack_compose":         cn_result.get("localstack_compose", ""),
+                    "sre_runbook":                cn_result.get("sre_runbook", []),
+                },
+               } if is_java_artifact else {}),
+            # Business/FinOps agent (siempre)
+            "business": {
+                "risk_score":       biz_result.get("risk_score"),
+                "risk_rationale":   biz_result.get("risk_rationale", ""),
+                "tco_legacy":       biz_result.get("tco_legacy", {}),
+                "tco_aws":          biz_result.get("tco_aws", {}),
+                "roi":              biz_result.get("roi", {}),
+                "c_suite_summary":  biz_result.get("c_suite_summary", ""),
+                "cost_drivers":     biz_result.get("cost_drivers", []),
+            },
+            "_analysis_method":    "agentic_parallel" + ("_java" if is_java_artifact else ""),
             "_rag_used":           bool(rag_ctx),
         }
-        logger.info("[Job %s] Agéntico OK — sec=%d mig=%d code=%d rag=%s",
+        logger.info("[Job %s] Agéntico OK — sec=%d mig=%d code=%d biz=%s rag=%s",
                     job_id[:8], len(top_findings),
                     len(mig_result.get("sprints", {})),
                     len(code_result.get("code_remediation", [])),
+                    bool(biz_result),
                     bool(rag_ctx))
 
     else:
         # ── Fallback: prompt monolítico original ─────────────────────────────
-        JOBS[job_id]["message"] = "Fallback a análisis monolítico..."
+        _update_job_status(job_id, "running", "Fallback a análisis monolítico...")
         logger.warning("[Job %s] Agéntico falló — usando prompt monolítico", job_id[:8])
         ai_response = None
         prompt = SYSTEM_PROMPT_TEMPLATE.format(
@@ -780,7 +1165,7 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
         )
         for model_fb in MODEL_CHAIN:
             mid_fb = model_fb["id"]
-            JOBS[job_id]["message"] = f"Consultando {model_fb['label']} (fallback)..."
+            _update_job_status(job_id, "running", f"Consultando {model_fb['label']} (fallback)...")
             try:
                 resp = bedrock.converse(
                     modelId=mid_fb,
@@ -799,30 +1184,60 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
                 logger.warning("[Job %s] Fallback %s falló: %s", job_id[:8], mid_fb, e)
 
         if not ai_response:
-            JOBS[job_id].update({"status": "failed", "message": "Todos los modelos fallaron", "error": last_error})
+            _update_job_status(job_id, "failed", "Todos los modelos fallaron", error=last_error)
             logger.error("[Job %s] Todos fallaron. Último error: %s", job_id[:8], last_error)
             return
 
     # ── Guardar resultado ─────────────────────────────────────────────────────
     scan_id = str(uuid.uuid4())
-    # Buscar el scan anterior del mismo hostname para el diff de modernización
-    prev_row = _find_scan_by_hostname(hostname, within_hours=876600)  # cualquier scan previo
+    prev_row = _find_scan_by_hostname(hostname, within_hours=876600)
     prev_scan_id = prev_row["id"] if prev_row else None
-    _save_scan(scan_id, hostname, raw_data, ai_response, mid, data_hash, prev_scan_id)
+    
+    _update_job_status(job_id, "running", "Generando vector semántico...")
+    try:
+        embedding_vec = _get_embedding(inventory)
+    except Exception as e:
+        logger.warning("No se pudo generar embedding en background: %s", e)
+        embedding_vec = None
+
+    _save_scan(scan_id, hostname, raw_data, ai_response, mid, data_hash, prev_scan_id, embedding=embedding_vec)
     ANALYSIS_CACHE[data_hash] = {
         "scan_id": scan_id, "ai_content": ai_response,
         "model_used": mid, "timestamp": datetime.now().isoformat()
     }
-    JOBS[job_id].update({
-        "status":     "completed",
-        "message":    f"Completado ({ai_response.get('_analysis_method','agentic')})",
-        "model_used": mid,
-        "scan_id":    scan_id,
-        "ai_content": ai_response
-    })
+    _update_job_status(job_id, "completed", f"Completado ({ai_response.get('_analysis_method','agentic')})",
+                       ai_content=ai_response, scan_id=scan_id, model_used=mid)
     logger.info("[Job %s] Guardado scan %s", job_id[:8], scan_id[:8])
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
+
+@app.post("/system/rag/backfill")
+async def rag_backfill(background_tasks: BackgroundTasks, _user: str = Depends(verify_auth)):
+    """Genera en background los embeddings para históricos previos sin vector semántico."""
+    def _do_backfill():
+        conn, db_type = _get_conn()
+        if db_type == "sqlite":
+            conn.row_factory = sqlite3.Row
+        ph = _ph(db_type)
+        
+        rows = conn.execute("SELECT id, raw_inventory FROM scan_history WHERE embedding IS NULL").fetchall()
+        logger.info(f"Iniciando backfill de RAG para {len(rows)} scans...")
+        for row in rows:
+            scan_id = dict(row)["id"]
+            raw_inv = dict(row)["raw_inventory"]
+            try:
+                vec = _get_embedding(raw_inv)
+                if vec:
+                    conn.execute(f"UPDATE scan_history SET embedding = {ph} WHERE id = {ph}", (json.dumps(vec), scan_id))
+                    conn.commit()
+            except Exception as e:
+                logger.warning(f"Falla backfill RAG para scan {scan_id}: {e}")
+        conn.close()
+        logger.info("Backfill RAG completado.")
+
+    background_tasks.add_task(_do_backfill)
+    return {"status": "ok", "message": "Backfill RAG iniciado en background."}
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "5.0.0", "db": "postgresql" if DATABASE_URL else "sqlite",
@@ -888,21 +1303,62 @@ def analyze_legacy(
 
     # 4. Nuevo job asíncrono
     job_id = str(uuid.uuid4())
-    JOBS[job_id] = {
-        "status": "pending",
-        "message": "En cola...",
-        "model_used": None,
-        "created_at": datetime.now().isoformat()
-    }
+    # Create via DB upsert
+    _update_job_status(job_id, "pending", "En cola...")
+    
     background_tasks.add_task(_run_bedrock_job, job_id, raw_data, hostname, data_hash, industry)
     logger.info("Job creado: %s para host '%s' [industria: %s, force=%s]", job_id[:8], hostname, industry, force)
     return {"status": "pending", "method": "async", "job_id": job_id}
 
 @app.get("/status/{job_id}")
 async def job_status(job_id: str, _user: str = Depends(verify_auth)):
-    if job_id not in JOBS:
+    job = _get_job(job_id)
+    if not job:
         raise HTTPException(status_code=404, detail="Job no encontrado o expirado")
-    return JOBS[job_id]
+    return job
+
+from fastapi.responses import StreamingResponse
+import asyncio
+
+@app.get("/stream/{job_id}")
+async def job_stream(job_id: str, _user: str = Depends(verify_auth)):
+    """Streaming de Server-Sent Events (SSE) para progreso en vivo, leyendo de memoria o BD."""
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job no encontrado o expirado")
+        
+    async def event_generator():
+        last_msg = ""
+        last_status = ""
+        while True:
+            job = _get_job(job_id)
+            if not job:
+                yield "data: {\"status\": \"error\", \"message\": \"Job vanished\"}\n\n"
+                break
+            
+            current_msg = job.get("message", "")
+            current_status = job.get("status", "pending")
+            
+            if current_status != last_status or current_msg != last_msg:
+                payload = {
+                    "status": current_status,
+                    "message": current_msg,
+                    "model_used": job.get("model_used")
+                }
+                if current_status in ["completed", "failed"]:
+                    payload["scan_id"] = job.get("scan_id")
+                    payload["error"] = job.get("error")
+                    payload["ai_content"] = job.get("ai_content")
+                
+                yield f"data: {json.dumps(payload)}\n\n"
+                last_msg = current_msg
+                last_status = current_status
+                
+            if current_status in ["completed", "failed"]:
+                break
+            await asyncio.sleep(0.5)
+            
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.get("/history")
 async def get_history(_user: str = Depends(verify_auth)):
@@ -974,6 +1430,10 @@ def _run_collect_job(task_id: str, hostname: str, port: int, username: str, pass
         msg = "Autenticación rechazada."
         if username == "root":
             msg += " Muchos servidores prohíben login root por contraseña (usa .pem)."
+        COLLECT_JOBS[task_id].update({"status": "failed", "error": msg, "message": msg})
+    except socket.gaierror:
+        if client: client.close()
+        msg = "Error de DNS: No se pudo resolver el hostname. Verifica que el nombre sea correcto o intenta usando la IP."
         COLLECT_JOBS[task_id].update({"status": "failed", "error": msg, "message": msg})
     except (socket.timeout, paramiko.ssh_exception.NoValidConnectionsError) as e:
         if client: client.close()
@@ -1810,13 +2270,20 @@ _PRICING_BASELINE = {
 def _detect_stack_for_pricing(bp: dict, raw_inventory: str) -> dict:
     """Detecta el stack del inventario para calcular el sizing AWS adecuado."""
     inv_lower = raw_inventory.lower()
+    # Detectar BD por patrones específicos de JDBC/drivers, no por "oracle" genérico
+    # "oracle" aparece en Oracle Java, Oracle WebLogic, Oracle Service Bus — no indica BD
+    _db_oracle  = any(t in inv_lower for t in ["ojdbc", "oracle.jdbc", "oracle database", "oracle db", "orcl", "sid=", "service_name="])
+    _db_mysql   = any(t in inv_lower for t in ["mysql-connector", "mysql connector", "com.mysql", "jdbc:mysql"])
+    _db_pg      = any(t in inv_lower for t in ["postgresql", "pgjdbc", "org.postgresql", "jdbc:postgresql"])
+    _db_mssql   = any(t in inv_lower for t in ["mssql", "sqlserver", "jtds", "jdbc:sqlserver"])
+    _db_mariadb = "mariadb" in inv_lower
     result = {
-        "has_web":         any(t in inv_lower for t in ["tomcat", "nginx", "apache", "node", "jboss", "websphere", "weblogic"]),
-        "has_db":          any(t in inv_lower for t in ["oracle", "mysql", "postgres", "mssql", "mariadb"]),
-        "has_cache":       any(t in inv_lower for t in ["redis", "memcached", "hazelcast", "infinispan"]),
-        "db_engine":       "oracle" if "oracle" in inv_lower else ("postgres" if "postgres" in inv_lower else "mysql"),
-        "vcpus":           2,    # default sizing conservador
-        "ram_gb":          4,
+        "has_web":     any(t in inv_lower for t in ["tomcat", "nginx", "apache", "node", "jboss", "websphere", "weblogic"]),
+        "has_db":      any([_db_oracle, _db_mysql, _db_pg, _db_mssql, _db_mariadb]),
+        "has_cache":   any(t in inv_lower for t in ["redis", "memcached", "hazelcast", "infinispan"]),
+        "db_engine":   "oracle" if _db_oracle else ("postgres" if _db_pg else ("mysql" if _db_mysql else "mssql" if _db_mssql else "mysql")),
+        "vcpus":       2,    # default sizing conservador
+        "ram_gb":      4,
     }
     # Ajustar sizing según coupling score
     ca = bp.get("current_architecture", {})
@@ -1830,7 +2297,7 @@ def _detect_stack_for_pricing(bp: dict, raw_inventory: str) -> dict:
     return result
 
 @app.get("/pricing/{scan_id}")
-async def get_aws_pricing(scan_id: str, region: str = "us-east-1", _user: str = Depends(verify_auth)):
+async def get_aws_pricing(scan_id: str, env: str = "prod", region: str = "us-east-1", _user: str = Depends(verify_auth)):
     """
     Calcula estimación de costos AWS reales para el stack detectado en el análisis.
     Retorna comparativa On-Prem vs AWS con desglose por servicio.
@@ -1855,7 +2322,7 @@ async def get_aws_pricing(scan_id: str, region: str = "us-east-1", _user: str = 
 
     stack = _detect_stack_for_pricing(bp, rd.get("raw_inventory") or "")
     p     = _PRICING_BASELINE
-    HOURS_MONTH = 730
+    HOURS_MONTH = 217 if env == "dev" else 730
 
     # ── Intentar obtener precios reales de AWS Pricing API (us-east-1 siempre)
     real_prices = {}
@@ -2038,6 +2505,955 @@ async def validate_iac(scan_id: str, _user: str = Depends(verify_auth)):
         "overall": overall,
         "results": results,
         "validated_at": datetime.now().isoformat(),
+    }
+
+
+# ─── Java Artifact Agent ──────────────────────────────────────────────────────
+
+_AGENT_JAVA_PROMPT = """
+Eres un Staff Engineer con 15 años de experiencia modernizando aplicaciones Java Enterprise hacia AWS y Spring Boot.
+Se te entrega el inventario técnico DETALLADO extraído directamente del bytecode y descriptores de un artefacto Java (.ear/.war/.jar),
+incluyendo: clases detectadas con sus roles, SQL hardcodeado, antipatrones, CVEs en dependencias y versiones exactas.
+
+Tu misión: producir una guía de transformación CONCRETA y ACCIONABLE — no genérica.
+NUNCA uses placeholders como "ClassName" o "tu clase". Usa los nombres REALES del inventario.
+
+Retorna ÚNICAMENTE JSON válido con este esquema:
+{{
+  "executive_summary": "3-4 oraciones con: nombre del artefacto, stack real detectado (framework + versión exacta), riesgos top-3 con CVE IDs reales, estrategia recomendada",
+
+  "agent_analysis": "Análisis técnico en 5+ párrafos: (1) stack completo con versiones, (2) arquitectura actual JEE detectada (EJBs/Servlets/JSF/etc.), (3) deuda técnica específica por patrón detectado, (4) ruta de modernización recomendada con runtime AWS objetivo, (5) impacto y riesgos de la migración",
+
+  "java_findings": [
+    {{
+      "severity": "CRITICO|ALTO|MEDIO|BAJO",
+      "component": "nombre exacto del JAR o clase del inventario",
+      "version": "X.Y.Z exacta del inventario",
+      "issue": "descripción técnica con el riesgo real",
+      "cve": "CVE-XXXX-YYYY o N/A",
+      "recommendation": "acción concreta: comando, código o configuración"
+    }}
+  ],
+
+  "code_transformation": [
+    {{
+      "class_name": "nombre.completo.de.la.Clase (del inventario)",
+      "current_pattern": "EJB Stateless|Servlet|JSF ManagedBean|JAX-RS|JPA Entity|DAO|etc.",
+      "target_pattern": "Spring Boot @Service|@RestController|@Entity|@Repository|etc.",
+      "why": "razón técnica concreta para este cambio",
+      "before": "fragmento de código JEE típico de este patrón (<8 líneas)",
+      "after": "código Spring Boot equivalente (<8 líneas)",
+      "effort_days": 1,
+      "dependencies_to_add": ["groupId:artifactId:version"],
+      "dependencies_to_remove": ["groupId:artifactId"]
+    }}
+  ],
+
+  "dependency_analysis": {{
+    "total_jars": 0,
+    "vulnerable": ["artifact-version → CVE-XXXX: descripción"],
+    "outdated": ["artifact vX.Y → actualizar a vA.B (razón)"],
+    "eol": ["artifact — EoL desde YYYY, reemplazar con X"],
+    "to_remove": ["artifact — reemplazado por Y en Spring Boot"],
+    "to_add": ["groupId:artifactId:version — para soportar migración"]
+  }},
+
+  "sql_analysis": [
+    {{
+      "query": "fragmento SQL encontrado en bytecode",
+      "class": "NombreClase donde fue detectado",
+      "recommendation": "migrar a Spring Data @Query o método JpaRepository",
+      "jpa_equivalent": "ejemplo de método JPA equivalente"
+    }}
+  ],
+
+  "externalization": [
+    {{
+      "type": "JNDI|JDBC_URL|Filesystem|HTTP_URL|Hardcoded_Config|Profile",
+      "found_in": "NombreClase o archivo",
+      "current_value": "valor o patrón detectado (sanitizado)",
+      "target": "AWS SSM Parameter Store|Secrets Manager|S3|application.yml (Ejs: database URL, keys)",
+      "how": "instrucción concreta de migración"
+    }}
+  ],
+
+  "containerization": {{
+    "base_image": "eclipse-temurin:17-jre-alpine (u otra según Java version detectada)",
+    "dockerfile_lift_shift": "Dockerfile completo para Lift & Shift directo (ej: usar FROM tomcat:9-jdk11 si es WAR sin cambios)",
+    "dockerfile_modernized": "Dockerfile completo multi-stage asumiendo que se migró exitosamente a Spring Boot (fat-jar)",
+    "env_vars": ["SPRING_PROFILES_ACTIVE=prod", "SPRING_DATASOURCE_URL=jdbc:postgresql://...", "..."],
+    "health_check": "curl -f http://localhost:8080/actuator/health || exit 1",
+    "jvm_flags": "-Xmx512m -Xms256m -XX:+UseContainerSupport -XX:MaxRAMPercentage=75",
+    "toxic_dependencies": ["Lista de bloqueantes (JNI, .dll/.so locales, file systems montados localmente) identificados explícitamente"]
+  }},
+
+  "migration_strategy": {{
+    "approach": "strangler-fig|re-architect|repackage|lift-and-shift",
+    "rationale": "justificación técnica basada en patrones detectados",
+    "target_runtime": "ECS Fargate|EKS|Lambda|Elastic Beanstalk",
+    "estimated_effort_weeks": 0,
+    "phases": ["fase 1: ...", "fase 2: ..."]
+  }},
+
+  "code_remediation": [
+    {{
+      "file": "nombre.completo.Clase (del inventario)",
+      "issue": "antipatrón concreto detectado",
+      "before": "código legacy (<6 líneas)",
+      "after": "código modernizado (<6 líneas)",
+      "priority": "HIGH|MEDIUM|LOW",
+      "effort": "Xd"
+    }}
+  ],
+
+  "quick_wins": ["acción concreta en <2 semanas: qué clase, qué cambiar, qué ganas"],
+
+  "sprints": {{
+    "sprint_0": ["tarea concreta con clase/archivo real — rol responsable — Xd"],
+    "sprint_1": ["..."],
+    "sprint_2": ["..."],
+    "sprint_3": ["..."]
+  }},
+
+  "risk_matrix": [
+    {{
+      "component": "nombre real del componente",
+      "probability": "Alta|Media|Baja",
+      "impact": "Alto|Medio|Bajo",
+      "mitigation": "acción concreta"
+    }}
+  ]
+}}
+"""
+
+# ── Bytecode / constant-pool analysis ────────────────────────────────────────
+
+def _scan_class_bytecode(class_bytes: bytes) -> list[str]:
+    """
+    Extrae todas las cadenas UTF-8 del constant pool de un .class.
+    El formato es: tag(1) + length(2) + bytes para tag=1 (Utf8).
+    Maneja correctamente los slots dobles de Long/Double.
+    """
+    strings: list[str] = []
+    if len(class_bytes) < 10 or class_bytes[:4] != b"\xca\xfe\xba\xbe":
+        return strings
+    try:
+        cp_count = int.from_bytes(class_bytes[8:10], "big")
+        i = 10
+        idx = 1
+        while idx < cp_count and i < len(class_bytes):
+            tag = class_bytes[i]; i += 1
+            if tag == 1:       # Utf8
+                ln = int.from_bytes(class_bytes[i:i+2], "big"); i += 2
+                try:
+                    strings.append(class_bytes[i:i+ln].decode("utf-8", errors="replace"))
+                except Exception:
+                    pass
+                i += ln; idx += 1
+            elif tag in (3, 4):  i += 4;  idx += 1   # Integer / Float
+            elif tag in (5, 6):  i += 8;  idx += 2   # Long / Double (doble slot)
+            elif tag in (7, 8, 16, 19, 20): i += 2; idx += 1
+            elif tag in (9, 10, 11, 12, 17, 18): i += 4; idx += 1
+            elif tag == 15:  i += 3; idx += 1
+            else: break
+    except Exception:
+        pass
+    return strings
+
+# Anotaciones JEE/Spring que identifican el rol de una clase
+_ANNOTATION_ROLES: dict[str, str] = {
+    # Servlets y MVC
+    "javax/servlet/http/HttpServlet":             "Servlet",
+    "jakarta/servlet/http/HttpServlet":           "Servlet",
+    "javax/servlet/annotation/WebServlet":        "Servlet",
+    "org/springframework/web/bind/annotation/RestController": "REST Controller",
+    "org/springframework/web/bind/annotation/Controller":     "MVC Controller",
+    "org/springframework/web/bind/annotation/RequestMapping": "Spring MVC",
+    "javax/ws/rs/Path":                           "JAX-RS Resource",
+    "jakarta/ws/rs/Path":                         "JAX-RS Resource",
+    # EJB
+    "javax/ejb/Stateless":                        "EJB Stateless",
+    "jakarta/ejb/Stateless":                      "EJB Stateless",
+    "javax/ejb/Stateful":                         "EJB Stateful",
+    "jakarta/ejb/Stateful":                       "EJB Stateful",
+    "javax/ejb/Singleton":                        "EJB Singleton",
+    "jakarta/ejb/Singleton":                      "EJB Singleton",
+    "javax/ejb/MessageDriven":                    "MDB (Message-Driven Bean)",
+    # Persistencia
+    "javax/persistence/Entity":                   "JPA Entity",
+    "jakarta/persistence/Entity":                 "JPA Entity",
+    "org/hibernate/annotations/Entity":           "Hibernate Entity",
+    "org/springframework/data/repository/Repository": "Spring Repository",
+    "org/springframework/stereotype/Repository":  "Spring Repository",
+    # Spring
+    "org/springframework/stereotype/Service":     "Spring Service",
+    "org/springframework/stereotype/Component":   "Spring Component",
+    "org/springframework/context/annotation/Configuration": "Spring Config",
+    "org/springframework/scheduling/annotation/Scheduled": "Scheduled Task",
+    # JSF
+    "javax/faces/bean/ManagedBean":               "JSF ManagedBean",
+    "jakarta/faces/bean/ManagedBean":             "JSF ManagedBean",
+    # Seguridad
+    "javax/annotation/security/RolesAllowed":     "Secured (RolesAllowed)",
+    "org/springframework/security/access/annotation/Secured": "Spring Security",
+    # Frameworks Legacy Extras
+    "org/apache/axis/":                           "Axis SOAP WebService",
+    "org/apache/wicket/":                         "Apache Wicket",
+    "com/google/gwt/":                            "Google Web Toolkit (GWT)",
+    "com/ibatis/":                                "iBATIS ORM",
+}
+
+_MIGRATION_MAP: dict[str, str] = {
+    "Servlet":              "→ Spring Boot @RestController + @RequestMapping",
+    "REST Controller":      "→ Mantener patrón, actualizar a Spring Boot 3.x / Jakarta EE 10",
+    "MVC Controller":       "→ Mantener @Controller, migrar vistas a Thymeleaf o API REST",
+    "JAX-RS Resource":      "→ Migrar a Spring Boot @RestController o quarkus @Path",
+    "EJB Stateless":        "→ @Service de Spring Boot + @Transactional",
+    "EJB Stateful":         "→ @Service con @Scope(\"session\") o Redis para estado",
+    "EJB Singleton":        "→ @Component @Scope(\"singleton\") o Spring @Bean",
+    "MDB (Message-Driven Bean)": "→ @SqsListener (AWS SQS) o @KafkaListener",
+    "JPA Entity":           "→ Mantener @Entity, migrar a Spring Data JPA + Flyway",
+    "Hibernate Entity":     "→ Migrar a javax/jakarta @Entity estándar + Spring Data",
+    "Spring Repository":    "→ Extender JpaRepository<T,ID> — sin cambio mayor",
+    "Spring Service":       "→ Mantener, revisar @Transactional y manejo de excepciones",
+    "Spring Component":     "→ Mantener, revisar inyección de dependencias",
+    "Spring Config":        "→ Migrar a application.yml + @ConfigurationProperties",
+    "JSF ManagedBean":      "→ Eliminar JSF, migrar a REST API + frontend React/Angular",
+    "Scheduled Task":       "→ AWS EventBridge + Lambda, o mantener @Scheduled en ECS",
+    "Secured (RolesAllowed)": "→ Spring Security @PreAuthorize + JWT / Cognito",
+    "Spring Security":      "→ Actualizar Spring Security 6.x + OAuth2/OIDC con Cognito",
+    "Axis SOAP WebService": "→ Migrar a JAX-WS o modernizar a Spring Boot REST @RestController",
+    "Apache Wicket":        "→ Rewrite frontend en React/Angular, exponer API REST",
+    "Google Web Toolkit (GWT)": "→ Rewrite frontend en React/Angular, exponer API REST",
+    "iBATIS ORM":           "→ Migrar a MyBatis o Spring Data JPA",
+}
+
+# Patrones de strings que indican código que necesita transformación
+_CODE_SMELL_PATTERNS: list[tuple[str, str, str]] = [
+    # (pattern_substring, category, description)
+    ("java:comp/env",          "JNDI",         "JNDI lookup — reemplazar con @Autowired / AWS SSM Parameter Store"),
+    ("java:jboss",             "JNDI",         "JNDI JBoss — eliminar dependencia de servidor de aplicaciones"),
+    ("InitialContext",         "JNDI",         "javax.naming.InitialContext — migrar a inyección de dependencias"),
+    ("System.getenv",          "Config",       "Variables de entorno directas — usar @ConfigurationProperties"),
+    ("System.getProperty",     "Config",       "System.getProperty — externalizar a application.yml"),
+    ("SELECT ",                "SQL",          "SQL hardcodeado — mover a Spring Data JPA / named queries"),
+    ("INSERT INTO",            "SQL",          "SQL hardcodeado — mover a repositorio JPA"),
+    ("UPDATE ",                "SQL",          "SQL hardcodeado — revisar si puede ser método JPA"),
+    ("DELETE FROM",            "SQL",          "SQL hardcodeado — mover a repositorio JPA"),
+    ("jdbc:",                  "DataSource",   "JDBC URL hardcodeada — mover a AWS RDS + Secrets Manager"),
+    ("http://",                "URL",          "URL HTTP en código — usar HTTPS y externalizar a config"),
+    ("new Thread(",            "Threading",    "Thread manual — migrar a @Async de Spring o ECS tasks"),
+    ("Runtime.exec",           "Security",     "Runtime.exec — riesgo de command injection, revisar"),
+    ("HttpURLConnection",      "HTTP",         "HttpURLConnection legacy — migrar a RestTemplate o WebClient"),
+    ("FileInputStream",        "FileIO",       "FileInputStream — en contenedor usar S3 / EFS en vez de filesystem"),
+    ("new File(",              "FileIO",       "Acceso a filesystem local — migrar a Amazon S3"),
+    ("printStackTrace",        "Logging",      "printStackTrace — reemplazar con Logger (SLF4J/Logback)"),
+    ("MD5",                    "Security",     "MD5 detectado — algoritmo inseguro, usar SHA-256 o bcrypt"),
+    ("DES",                    "Security",     "DES detectado — cifrado inseguro, migrar a AES-256"),
+    ("password",               "Security",     "String 'password' en constante — verificar si está hardcodeado"),
+    ("EJBContext",             "EJB",          "EJBContext — eliminar en migración a Spring Boot"),
+    ("UserTransaction",        "Transaction",  "UserTransaction JTA — reemplazar con @Transactional de Spring"),
+    ("HttpSession",            "Stateful",     "Uso pesado de HttpSession — externalizar estado a Redis o DynamoDB para Container/K8s"),
+    ("ehcache",                "Stateful",     "Caché en memoria local local (Ehcache) — migrar a caché distribuido (ElastiCache)"),
+    ("javax/ejb/Timer",        "Concurrency",  "Temporizador EJB dependiente del nodo local — usar AWS EventBridge o Quartz Distribuido"),
+    ("TimerTask",              "Concurrency",  "TimerTask — no escala en K8s (múltiples pods ejecutarán a la vez)"),
+    ("System.loadLibrary",     "Toxic",        "JNI nativo (.dll/.so) — bloqueante para cambiar CPU arch y OS image en Docker"),
+]
+
+def _classify_and_analyze_class(entry_path: str, strings: list[str]) -> dict | None:
+    """
+    Dado el path de un .class y sus strings del constant pool,
+    retorna un dict con su clasificación, smells y hints de migración.
+    """
+    # Nombre de clase legible
+    class_name = entry_path.replace("/", ".").removesuffix(".class")
+    for strip in ["WEB-INF.classes.", "APP-INF.classes.", "BOOT-INF.classes."]:
+        class_name = class_name.split(strip, 1)[-1]
+
+    # Ignorar clases anónimas/internas menores
+    if "$" in class_name.split(".")[-1] and len(class_name.split(".")[-1]) < 4:
+        return None
+
+    str_set = set(strings)
+    str_joined = " ".join(strings)
+
+    # Detectar rol
+    roles = []
+    for annotation_path, role in _ANNOTATION_ROLES.items():
+        if annotation_path in str_set or annotation_path.replace("/", ".") in str_joined:
+            if role not in roles:
+                roles.append(role)
+
+    # Detectar smells
+    smells = []
+    for (pattern, category, desc) in _CODE_SMELL_PATTERNS:
+        if any(pattern.lower() in s.lower() for s in strings):
+            smells.append({"category": category, "detail": desc})
+
+    # SQL queries encontradas
+    sql_hits = [s[:120] for s in strings
+                if len(s) > 15 and any(kw in s.upper() for kw in ["SELECT ", "INSERT INTO", "UPDATE ", "DELETE FROM", "CALL "])]
+
+    # URLs encontradas
+    urls = [s[:100] for s in strings if s.startswith(("http://", "https://", "jdbc:")) and len(s) > 8]
+
+    if not roles and not smells and not sql_hits:
+        return None  # Clase sin señales relevantes
+
+    return {
+        "class": class_name,
+        "roles": roles,
+        "migration_hints": [_MIGRATION_MAP[r] for r in roles if r in _MIGRATION_MAP],
+        "smells": smells,
+        "sql_found": sql_hits[:3],
+        "urls_found": urls[:3],
+    }
+
+
+def _parse_manifest(content: str) -> dict:
+    result = {}
+    for line in content.splitlines():
+        if ": " in line:
+            k, _, v = line.partition(": ")
+            result[k.strip()] = v.strip()
+    return result
+
+def _parse_xml_safe(content: str) -> ET.Element | None:
+    try:
+        return ET.fromstring(content)
+    except ET.ParseError:
+        return None
+
+# ── CVE knowledge base ────────────────────────────────────────────────────────
+# (artifact_id_pattern, min_version_inclusive, max_version_exclusive, CVE, severity, description)
+_JAVA_CVE_MAP: dict[str, list[tuple]] = {
+    "log4j-core":             [("2.0","2.17.1","CVE-2021-44228","CRITICO","Log4Shell — RCE via JNDI lookup"),
+                                ("2.0","2.3.2", "CVE-2021-45105","ALTO",  "Log4j2 infinite recursion DoS")],
+    "log4j":                  [("1.0","2.0",   "CVE-2019-17571","CRITICO","Log4j 1.x SocketServer RCE — EoL desde 2015")],
+    "struts2-core":           [("2.0","2.5.33","CVE-2023-50164","CRITICO","Struts2 path traversal → RCE"),
+                                ("2.0","2.5.30","CVE-2017-5638", "CRITICO","Struts2 Content-Type RCE (Equifax breach)")],
+    "spring-core":            [("5.3.0","5.3.18","CVE-2022-22965","CRITICO","Spring4Shell — RCE via DataBinder (JDK9+)"),
+                                ("5.0.0","5.2.20","CVE-2022-22965","CRITICO","Spring4Shell — RCE via DataBinder (JDK9+)")],
+    "spring-webmvc":          [("5.3.0","5.3.18","CVE-2022-22965","CRITICO","Spring4Shell — mismo vector que spring-core")],
+    "spring-security-core":   [("5.0.0","5.6.9","CVE-2022-22978","ALTO","Spring Security regex bypass en auth")],
+    "jackson-databind":       [("2.0.0","2.12.6","CVE-2020-36518","ALTO","Stack overflow DoS"),
+                                ("2.0.0","2.9.10","CVE-2019-14379","CRITICO","RCE via deserialization gadget")],
+    "xstream":                [("1.0.0","1.4.20","CVE-2022-41966","ALTO","Stack overflow DoS via XML malformado"),
+                                ("1.0.0","1.4.18","CVE-2021-43859","ALTO","DoS via XML crafteado")],
+    "commons-collections":    [("3.0","3.2.2","CVE-2015-7501","CRITICO","RCE via deserialization — gadget chain clásico"),
+                                ("4.0","4.1",  "CVE-2015-7501","CRITICO","Commons Collections 4.x — misma gadget chain")],
+    "commons-text":           [("1.0","1.10.0","CVE-2022-42889","CRITICO","Text4Shell — RCE via StringSubstitutor interpolation")],
+    "commons-fileupload":     [("0.0","1.5",   "CVE-2023-24998","ALTO","DoS via unlimited multipart parts")],
+    "shiro-core":             [("1.0.0","1.11.0","CVE-2023-34478","CRITICO","Apache Shiro path traversal — auth bypass"),
+                                ("1.0.0","1.9.1", "CVE-2022-32532","CRITICO","Shiro authentication bypass")],
+    "h2":                     [("0.0","2.1.210","CVE-2021-42392","CRITICO","H2 Console RCE via JNDI — igual vector que Log4Shell")],
+    "velocity-engine-core":   [("0.0","2.3.0",  "CVE-2020-13936","CRITICO","Velocity Engine SSTI — RCE en sandbox")],
+    "velocity":               [("0.0","1.7.1",  "CVE-2020-13936","CRITICO","Velocity SSTI — RCE en sandbox")],
+    "groovy":                 [("0.0","2.4.21", "CVE-2016-6814", "CRITICO","Groovy RCE via deserialization")],
+    "mybatis":                [("0.0","3.5.6",  "CVE-2020-26945","MEDIO", "MyBatis deserialization")],
+    "fastjson":               [("0.0","1.2.83", "CVE-2022-25845","CRITICO","Fastjson AutoType RCE")],
+    "netty-all":              [("0.0","4.1.77", "CVE-2022-24823","MEDIO", "Netty temp dir privilege escalation")],
+    "okhttp":                 [("0.0","4.9.2",  "CVE-2021-0341", "MEDIO", "OkHttp hostname verification bypass")],
+    "snakeyaml":              [("0.0","2.0",    "CVE-2022-1471", "CRITICO","SnakeYAML Constructor RCE via deserialization")],
+}
+
+def _ver_tuple(v: str) -> tuple:
+    try:
+        return tuple(int(x) for x in re.sub(r"[^0-9.]", ".", v).split(".") if x)
+    except Exception:
+        return (0,)
+
+def _ver_in_range(version: str, lo: str, hi: str) -> bool:
+    try:
+        return _ver_tuple(lo) <= _ver_tuple(version) < _ver_tuple(hi)
+    except Exception:
+        return False
+
+def _parse_jar_name(basename: str) -> tuple[str, str]:
+    """'log4j-core-2.14.1.jar' → ('log4j-core', '2.14.1')"""
+    name = basename.removesuffix(".jar")
+    parts = name.split("-")
+    ver_idx = next((i for i, p in enumerate(parts) if p and p[0].isdigit()), None)
+    if ver_idx is None or ver_idx == 0:
+        return name, ""
+    artifact = "-".join(parts[:ver_idx])
+    raw_ver = re.sub(r"[^0-9.]", ".", "-".join(parts[ver_idx:]))
+    version  = re.sub(r"\.+", ".", raw_ver).strip(".")
+    return artifact, version
+
+def _read_jar_manifest_version(zf_outer: zipfile.ZipFile, jar_entry: str) -> str:
+    """Intenta abrir un JAR anidado y leer Implementation-Version de su MANIFEST.MF."""
+    try:
+        jar_bytes = zf_outer.read(jar_entry)
+        with zipfile.ZipFile(io.BytesIO(jar_bytes)) as inner:
+            if "META-INF/MANIFEST.MF" in inner.namelist():
+                mf = inner.read("META-INF/MANIFEST.MF").decode("utf-8", errors="replace")
+                parsed = _parse_manifest(mf)
+                return (parsed.get("Implementation-Version")
+                        or parsed.get("Bundle-Version")
+                        or parsed.get("Specification-Version", ""))
+    except Exception:
+        pass
+    return ""
+
+_JAVA_CLASS_VERSIONS = {
+    45: "Java 1.1", 46: "Java 1.2", 47: "Java 1.3", 48: "Java 1.4",
+    49: "Java 5",   50: "Java 6",   51: "Java 7",   52: "Java 8",
+    53: "Java 9",   54: "Java 10",  55: "Java 11",  56: "Java 12",
+    57: "Java 13",  58: "Java 14",  59: "Java 15",  60: "Java 16",
+    61: "Java 17",  62: "Java 18",  63: "Java 19",  64: "Java 20",
+    65: "Java 21",
+}
+
+def _detect_java_class_version(zf: zipfile.ZipFile, class_entries: list[str]) -> str:
+    """Lee los magic bytes del primer .class para determinar la versión Java mínima requerida."""
+    for ce in class_entries[:5]:
+        try:
+            data = zf.read(ce)
+            if len(data) >= 8 and data[:4] == b"\xca\xfe\xba\xbe":
+                major = int.from_bytes(data[6:8], "big")
+                return _JAVA_CLASS_VERSIONS.get(major, f"Java (class major {major})")
+        except Exception:
+            continue
+    return ""
+
+def _extract_artifact_inventory(file_bytes: bytes, filename: str) -> str:
+    """
+    Extrae inventario técnico profundo de un artefacto Java (EAR/WAR/JAR):
+    versiones de dependencias, CVEs conocidos, descriptores XML, bytecode version,
+    configuraciones de framework, patrones de código detectados.
+    """
+    ext = filename.rsplit(".", 1)[-1].lower()
+    lines = [
+        f"ARTIFACT_NAME: {filename}",
+        f"ARTIFACT_TYPE: {ext.upper()}",
+        f"ARTIFACT_SIZE_KB: {len(file_bytes) // 1024}",
+        "",
+    ]
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            all_entries = zf.namelist()
+            lines.append(f"TOTAL_ENTRIES: {len(all_entries)}")
+
+            # ── 1. MANIFEST.MF principal ──────────────────────────────────────
+            for mk in ["META-INF/MANIFEST.MF", "MANIFEST.MF"]:
+                if mk in all_entries:
+                    mf = zf.read(mk).decode("utf-8", errors="replace")
+                    parsed = _parse_manifest(mf)
+                    lines.append("\n=== MANIFEST.MF ===")
+                    for k, v in parsed.items():
+                        lines.append(f"  {k}: {v}")
+                    break
+
+            # ── 2. Versión Java del bytecode ──────────────────────────────────
+            class_entries = [e for e in all_entries if e.endswith(".class")]
+            java_ver = _detect_java_class_version(zf, class_entries)
+            if java_ver:
+                lines.append(f"\n=== JAVA BYTECODE ===")
+                lines.append(f"  COMPILED_FOR: {java_ver}")
+                lines.append(f"  TOTAL_CLASSES: {len(class_entries)}")
+                # Paquetes top-level de la aplicación
+                pkgs = set()
+                for ce in class_entries:
+                    p = ce.rsplit("/", 1)[0].replace("/", ".")
+                    for strip in ["WEB-INF.classes.", "APP-INF.classes.", "BOOT-INF.classes."]:
+                        p = p.split(strip)[-1]
+                    pkgs.add(p)
+                top_pkgs = sorted({".".join(p.split(".")[:3]) for p in pkgs if p})[:20]
+                if top_pkgs:
+                    lines.append(f"  TOP_PACKAGES: {', '.join(top_pkgs)}")
+                # Heurísticas de tipo de aplicación
+                all_pkg_str = " ".join(pkgs).lower()
+                patterns = []
+                if "servlet" in all_pkg_str or "filter" in all_pkg_str:     patterns.append("Servlet/Filter")
+                if "javax.ws.rs" in all_pkg_str or "jakarta.ws.rs" in all_pkg_str: patterns.append("JAX-RS REST")
+                if "ejb" in all_pkg_str:                                      patterns.append("EJB")
+                if "jpa" in all_pkg_str or "hibernate" in all_pkg_str:       patterns.append("JPA/Hibernate")
+                if "spring" in all_pkg_str:                                   patterns.append("Spring")
+                if "dao" in all_pkg_str or "repository" in all_pkg_str:      patterns.append("DAO/Repository")
+                if "kafka" in all_pkg_str or "messaging" in all_pkg_str:     patterns.append("Messaging")
+                if patterns:
+                    lines.append(f"  DETECTED_PATTERNS: {', '.join(patterns)}")
+
+            # ── 3. Dependencias JAR con versión y CVE check ───────────────────
+            lib_jars = [e for e in all_entries if
+                        (e.startswith("WEB-INF/lib/") or e.startswith("lib/")
+                         or "APP-INF/lib/" in e or "BOOT-INF/lib/" in e)
+                        and e.endswith(".jar")]
+
+            if lib_jars:
+                lines.append(f"\n=== DEPENDENCIAS ({len(lib_jars)} JARs) ===")
+                cve_hits = []
+                for jar_entry in sorted(lib_jars):
+                    basename = jar_entry.rsplit("/", 1)[-1]
+                    artifact, ver_from_name = _parse_jar_name(basename)
+                    # Intentar versión más precisa desde MANIFEST interno (solo para JARs pequeños)
+                    jar_info = zf.getinfo(jar_entry)
+                    ver = ver_from_name
+                    if jar_info.file_size < 5 * 1024 * 1024:  # solo < 5 MB para no bloquear
+                        manifest_ver = _read_jar_manifest_version(zf, jar_entry)
+                        if manifest_ver:
+                            ver = manifest_ver
+                    # Buscar CVEs
+                    hits = []
+                    for cve_artifact, cve_list in _JAVA_CVE_MAP.items():
+                        if artifact.lower() == cve_artifact or artifact.lower().startswith(cve_artifact):
+                            for (lo, hi, cve_id, sev, desc) in cve_list:
+                                if ver and _ver_in_range(ver, lo, hi):
+                                    hits.append(f"[{sev}] {cve_id}: {desc}")
+                                    cve_hits.append((basename, cve_id, sev, desc))
+                    ver_str = f" v{ver}" if ver else ""
+                    cve_str = f" ⚠ {'; '.join(hits)}" if hits else ""
+                    lines.append(f"  {artifact}{ver_str}{cve_str}")
+
+                if cve_hits:
+                    lines.append(f"\n=== CVEs DETECTADOS EN DEPENDENCIAS ({len(cve_hits)}) ===")
+                    for (jar, cve_id, sev, desc) in cve_hits:
+                        lines.append(f"  [{sev}] {jar} → {cve_id}: {desc}")
+
+            # ── 4. pom.xml — dependencias declaradas ──────────────────────────
+            pom_files = [e for e in all_entries if e.endswith("pom.xml")]
+            for pom_path in pom_files[:1]:
+                raw = zf.read(pom_path).decode("utf-8", errors="replace")
+                root = _parse_xml_safe(raw)
+                if root is not None:
+                    lines.append(f"\n=== POM.XML ===")
+                    MVN = "http://maven.apache.org/POM/4.0.0"
+                    for tag in ["groupId", "artifactId", "version", "packaging"]:
+                        el = root.find(f"{{{MVN}}}{tag}")
+                        if el is not None and el.text:
+                            lines.append(f"  {tag.upper()}: {el.text}")
+                    java_ver_prop = root.find(f".//{{{MVN}}}maven.compiler.source")
+                    if java_ver_prop is not None and java_ver_prop.text:
+                        lines.append(f"  JAVA_SOURCE_VERSION: {java_ver_prop.text}")
+                    deps = root.findall(f"{{{MVN}}}dependencies/{{{MVN}}}dependency")
+                    if deps:
+                        lines.append(f"  DECLARED_DEPENDENCIES ({len(deps)}):")
+                        for dep in deps[:40]:
+                            g   = dep.findtext(f"{{{MVN}}}groupId", "")
+                            a   = dep.findtext(f"{{{MVN}}}artifactId", "")
+                            v   = dep.findtext(f"{{{MVN}}}version", "?")
+                            sc  = dep.findtext(f"{{{MVN}}}scope", "compile")
+                            lines.append(f"    {g}:{a}:{v} [{sc}]")
+
+            # ── 5. web.xml — análisis profundo ────────────────────────────────
+            webxml_list = [e for e in all_entries if e.endswith("WEB-INF/web.xml")]
+            for wxml in webxml_list[:1]:
+                raw = zf.read(wxml).decode("utf-8", errors="replace")
+                root = _parse_xml_safe(raw)
+                lines.append("\n=== WEB-INF/web.xml ===")
+                if root is not None:
+                    dn = root.find(".//{*}display-name")
+                    if dn is not None and dn.text:
+                        lines.append(f"  APP_NAME: {dn.text}")
+                    ver_attr = root.get("version", "")
+                    if ver_attr:
+                        lines.append(f"  SERVLET_SPEC: {ver_attr}")
+                    # Servlets y URL mappings
+                    servlets  = [s.text for s in root.findall(".//{*}servlet-name") if s.text]
+                    mappings  = [m.text for m in root.findall(".//{*}url-pattern") if m.text]
+                    filters   = [f.text for f in root.findall(".//{*}filter-name") if f.text]
+                    listeners = [l.text for l in root.findall(".//{*}listener-class") if l.text]
+                    if servlets:  lines.append(f"  SERVLETS ({len(servlets)}): {', '.join(servlets[:10])}")
+                    if filters:   lines.append(f"  FILTERS ({len(filters)}): {', '.join(filters[:10])}")
+                    if listeners: lines.append(f"  LISTENERS: {', '.join(listeners[:8])}")
+                    if mappings:  lines.append(f"  URL_PATTERNS: {', '.join(mappings[:15])}")
+                    # Security
+                    sec_constraints = root.findall(".//{*}security-constraint")
+                    sec_roles = [r.text for r in root.findall(".//{*}role-name") if r.text]
+                    auth_method = root.findtext(".//{*}auth-method", "")
+                    timeout = root.findtext(".//{*}session-timeout", "")
+                    if sec_constraints: lines.append(f"  SECURITY_CONSTRAINTS: {len(sec_constraints)}")
+                    if sec_roles:       lines.append(f"  SECURITY_ROLES: {', '.join(sec_roles)}")
+                    if auth_method:     lines.append(f"  AUTH_METHOD: {auth_method}")
+                    if timeout:         lines.append(f"  SESSION_TIMEOUT_MIN: {timeout}")
+                    # Context params (Spring ContextLoaderListener, etc.)
+                    ctx_params = {p.findtext(".//{*}param-name",""): p.findtext(".//{*}param-value","")
+                                  for p in root.findall(".//{*}context-param")}
+                    for k, v in list(ctx_params.items())[:8]:
+                        if k:
+                            lines.append(f"  CONTEXT_PARAM {k}: {str(v)[:120]}")
+                else:
+                    lines.append(f"  RAW_SNIPPET: {raw[:300]}")
+
+            # ── 6. application.xml (EAR) ──────────────────────────────────────
+            for axml in [e for e in all_entries if e.endswith("META-INF/application.xml")][:1]:
+                raw = zf.read(axml).decode("utf-8", errors="replace")
+                root = _parse_xml_safe(raw)
+                lines.append("\n=== META-INF/application.xml (EAR) ===")
+                if root is not None:
+                    dn = root.find(".//{*}display-name")
+                    if dn is not None and dn.text:
+                        lines.append(f"  EAR_NAME: {dn.text}")
+                    web_mods = [w.findtext(".//{*}web-uri","") for w in root.findall(".//{*}web")]
+                    ejb_mods = [e.text for e in root.findall(".//{*}ejb") if e.text]
+                    if web_mods: lines.append(f"  WEB_MODULES: {', '.join(web_mods)}")
+                    if ejb_mods: lines.append(f"  EJB_MODULES: {', '.join(ejb_mods)}")
+
+            # ── 7. ejb-jar.xml ────────────────────────────────────────────────
+            for epath in [e for e in all_entries if e.endswith("ejb-jar.xml")][:3]:
+                raw = zf.read(epath).decode("utf-8", errors="replace")
+                root = _parse_xml_safe(raw)
+                if root is not None:
+                    ejb_names    = [b.text for b in root.findall(".//{*}ejb-name") if b.text]
+                    ejb_classes  = [b.text for b in root.findall(".//{*}ejb-class") if b.text]
+                    session_types= [b.text for b in root.findall(".//{*}session-type") if b.text]
+                    lines.append(f"\n=== {epath} ===")
+                    if ejb_names:    lines.append(f"  EJB_BEANS ({len(ejb_names)}): {', '.join(ejb_names[:12])}")
+                    if ejb_classes:  lines.append(f"  EJB_CLASSES: {', '.join(ejb_classes[:8])}")
+                    if session_types:lines.append(f"  SESSION_TYPES: {', '.join(set(session_types))}")
+
+            # ── 8. persistence.xml (JPA) ──────────────────────────────────────
+            for pxml in [e for e in all_entries if e.endswith("persistence.xml")][:1]:
+                raw = zf.read(pxml).decode("utf-8", errors="replace")
+                root = _parse_xml_safe(raw)
+                lines.append("\n=== persistence.xml (JPA) ===")
+                if root is not None:
+                    units = root.findall(".//{*}persistence-unit")
+                    for u in units[:4]:
+                        name     = u.get("name", "?")
+                        tx_type  = u.get("transaction-type", "")
+                        provider = u.findtext(".//{*}provider", "")
+                        props    = {p.get("name",""): p.get("value","")
+                                    for p in u.findall(".//{*}property")}
+                        lines.append(f"  PERSISTENCE_UNIT: {name} [tx={tx_type}]")
+                        if provider: lines.append(f"    PROVIDER: {provider}")
+                        for k, v in props.items():
+                            if any(kw in k.lower() for kw in ["url","dialect","ddl","show","driver"]):
+                                safe_v = re.sub(r'(?i)(password|secret|pwd)[^;]*', '[REDACTED]', v)
+                                lines.append(f"    {k}: {safe_v[:120]}")
+
+            # ── 9. Spring XML configs ─────────────────────────────────────────
+            spring_xmls = [e for e in all_entries if
+                           ("applicationContext" in e or "spring" in e.lower() or "beans" in e.lower())
+                           and e.endswith(".xml")]
+            for sxml in spring_xmls[:3]:
+                raw = zf.read(sxml).decode("utf-8", errors="replace")
+                root = _parse_xml_safe(raw)
+                lines.append(f"\n=== {sxml} ===")
+                if root is not None:
+                    beans = root.findall(".//{*}bean")
+                    datasources = [b for b in beans if "datasource" in b.get("id","").lower()
+                                   or "datasource" in b.get("class","").lower()]
+                    tx_managers = [b for b in beans if "transaction" in b.get("id","").lower()]
+                    lines.append(f"  SPRING_BEANS: {len(beans)}")
+                    if datasources:
+                        for ds in datasources[:2]:
+                            url_prop = ds.find(".//{*}property[@name='url']")
+                            drv_prop = ds.find(".//{*}property[@name='driverClassName']")
+                            url = url_prop.get("value","") if url_prop is not None else ""
+                            drv = drv_prop.get("value","") if drv_prop is not None else ""
+                            safe_url = re.sub(r'(?i)(password|secret|pwd)[^&;]*', '[REDACTED]', url)
+                            lines.append(f"  DATASOURCE: {ds.get('id','?')} url={safe_url[:100]} driver={drv}")
+                    if tx_managers:
+                        lines.append(f"  TX_MANAGERS: {', '.join(b.get('id','?') for b in tx_managers[:3])}")
+                    # Imports de seguridad
+                    sec_imports = [e for e in raw.lower().split() if "security" in e and "http" in e]
+                    if sec_imports:
+                        lines.append(f"  SPRING_SECURITY_CONFIG: detected")
+
+            # ── 10. Struts config ─────────────────────────────────────────────
+            struts_xmls = [e for e in all_entries if "struts" in e.lower() and e.endswith(".xml")]
+            for sxml in struts_xmls[:2]:
+                raw = zf.read(sxml).decode("utf-8", errors="replace")
+                root = _parse_xml_safe(raw)
+                lines.append(f"\n=== {sxml} (Struts) ===")
+                if root is not None:
+                    actions = root.findall(".//{*}action")
+                    packages = root.findall(".//{*}package")
+                    lines.append(f"  STRUTS_ACTIONS: {len(actions)}")
+                    lines.append(f"  STRUTS_PACKAGES: {len(packages)}")
+                    for a in actions[:10]:
+                        lines.append(f"    action: name={a.get('name','')} class={a.get('class','')[:60]}")
+
+            # ── 11. Log4j / Logback configs ───────────────────────────────────
+            log_cfgs = [e for e in all_entries if
+                        any(n in e.lower() for n in ["log4j","logback"]) and
+                        e.endswith((".xml",".properties",".json",".yaml",".yml"))]
+            if log_cfgs:
+                lines.append(f"\n=== LOGGING CONFIG ===")
+                for lc in log_cfgs[:3]:
+                    lines.append(f"  {lc}")
+                    try:
+                        raw = zf.read(lc).decode("utf-8", errors="replace")
+                        # Detectar appenders con sockets (riesgo Log4Shell)
+                        if "socketappender" in raw.lower() or "jndi" in raw.lower():
+                            lines.append(f"    ⚠ RISK: SocketAppender / JNDI reference detectado")
+                        if "smtpappender" in raw.lower():
+                            lines.append(f"    INFO: SMTPAppender detectado (posible leak de info)")
+                    except Exception:
+                        pass
+
+            # ── 12. Server-specific descriptors ──────────────────────────────
+            server_descriptors = {
+                "jboss-web.xml":   "JBoss/WildFly",
+                "weblogic.xml":    "WebLogic",
+                "weblogic-ejb-jar.xml": "WebLogic EJB",
+                "ibm-web-bnd.xml": "WebSphere",
+                "glassfish-web.xml": "GlassFish",
+                "context.xml":     "Tomcat Context",
+                "jboss-ejb3.xml":  "JBoss EJB3",
+            }
+            found_descriptors = []
+            for entry in all_entries:
+                bname = entry.rsplit("/", 1)[-1].lower()
+                if bname in server_descriptors:
+                    found_descriptors.append(f"{server_descriptors[bname]} ({entry})")
+            if found_descriptors:
+                lines.append(f"\n=== SERVER-SPECIFIC DESCRIPTORS ===")
+                for fd in found_descriptors:
+                    lines.append(f"  {fd}")
+
+            # ── 13. Properties / YAML (.yml) con JDBC / datasources / profiles ──────────
+            prop_files = [e for e in all_entries
+                          if e.endswith((".properties", ".yml", ".yaml")) and "pom" not in e and "META-INF" not in e]
+            if prop_files:
+                lines.append(f"\n=== ARCHIVOS DE CONFIGURACIÓN Y PERFILES ({len(prop_files)}) ===")
+                for pf in prop_files[:10]:
+                    try:
+                        content = zf.read(pf).decode("utf-8", errors="replace")
+                        relevant = []
+                        for ln in content.splitlines():
+                            ln_low = ln.lower()
+                            if any(kw in ln_low for kw in ["url","host","port","driver","datasource",
+                                                            "server","endpoint","provider","dialect","profile","active"]):
+                                if not any(sk in ln_low for sk in ["password","secret","pwd","token","key"]):
+                                    relevant.append(ln.strip()[:120])
+                        if relevant:
+                            lines.append(f"  {pf}:")
+                            for r in relevant[:8]:
+                                lines.append(f"    {r}")
+                    except Exception:
+                        pass
+
+            # ── 14. EAR: módulos anidados ─────────────────────────────────────
+            if ext == "ear":
+                nested = [e for e in all_entries
+                          if e.endswith((".war", ".jar")) and "/" not in e.lstrip("/")]
+                if nested:
+                    lines.append(f"\n=== MÓDULOS ANIDADOS EN EAR ({len(nested)}) ===")
+                    for n in nested[:15]:
+                        info = zf.getinfo(n)
+                        lines.append(f"  {n} ({info.file_size // 1024} KB)")
+
+            # ── 15. Análisis de bytecode — roles, smells, SQL ─────────────────
+            class_entries = [e for e in all_entries if e.endswith(".class")]
+            analyzed: list[dict] = []
+            all_smells: dict[str, list[str]] = {}   # category → [detail]
+            all_sql: list[str] = []
+            all_urls: list[str] = []
+            role_summary: dict[str, int] = {}
+
+            # Analizar hasta 200 clases (las más grandes primero = más lógica de negocio)
+            classes_to_scan = sorted(
+                class_entries,
+                key=lambda e: zf.getinfo(e).file_size,
+                reverse=True
+            )[:200]
+
+            for ce in classes_to_scan:
+                try:
+                    cb = zf.read(ce)
+                    strings = _scan_class_bytecode(cb)
+                    result = _classify_and_analyze_class(ce, strings)
+                    if result:
+                        analyzed.append(result)
+                        for role in result["roles"]:
+                            role_summary[role] = role_summary.get(role, 0) + 1
+                        for smell in result["smells"]:
+                            all_smells.setdefault(smell["category"], [])
+                            if smell["detail"] not in all_smells[smell["category"]]:
+                                all_smells[smell["category"]].append(smell["detail"])
+                        all_sql.extend(result["sql_found"])
+                        all_urls.extend(result["urls_found"])
+                except Exception:
+                    continue
+
+            if role_summary:
+                lines.append(f"\n=== RESUMEN DE CLASES ANALIZADAS ({len(class_entries)} total, {len(analyzed)} con señales) ===")
+                for role, count in sorted(role_summary.items(), key=lambda x: -x[1]):
+                    migration = _MIGRATION_MAP.get(role, "")
+                    lines.append(f"  {role}: {count} clases  {migration}")
+
+            if analyzed:
+                lines.append(f"\n=== CLASES CON TRANSFORMACIÓN REQUERIDA (top {min(len(analyzed),30)}) ===")
+                for cls in analyzed[:30]:
+                    roles_str = ", ".join(cls["roles"]) if cls["roles"] else "Clase de negocio"
+                    hints_str = " | ".join(cls["migration_hints"][:2])
+                    lines.append(f"  [{roles_str}] {cls['class']}")
+                    if hints_str:
+                        lines.append(f"    MIGRACIÓN: {hints_str}")
+                    for smell in cls["smells"][:3]:
+                        lines.append(f"    ⚠ {smell['category']}: {smell['detail']}")
+                    for sql in cls["sql_found"][:2]:
+                        lines.append(f"    SQL: {sql}")
+
+            if all_smells:
+                lines.append(f"\n=== ANTIPATRONES DE CÓDIGO DETECTADOS ===")
+                for category, details in all_smells.items():
+                    lines.append(f"  [{category}]")
+                    for d in details[:2]:
+                        lines.append(f"    {d}")
+
+            if all_sql:
+                unique_sql = list(dict.fromkeys(all_sql))[:10]
+                lines.append(f"\n=== SQL HARDCODEADO ENCONTRADO ({len(unique_sql)} únicos) ===")
+                for sql in unique_sql:
+                    lines.append(f"  {sql[:120]}")
+
+            if all_urls:
+                unique_urls = list(dict.fromkeys(all_urls))[:10]
+                lines.append(f"\n=== URLs / JDBC ENCONTRADAS EN CÓDIGO ===")
+                for url in unique_urls:
+                    # No mostrar si contiene password
+                    safe = re.sub(r'(?i)(password|pwd|secret)[^@&;]*', '[REDACTED]', url)
+                    lines.append(f"  {safe}")
+
+    except zipfile.BadZipFile:
+        lines.append("ERROR: El archivo no es un ZIP/JAR válido")
+    except Exception as e:
+        lines.append(f"ERROR_PARSING: {str(e)[:200]}")
+
+    return "\n".join(lines)
+
+
+
+_ALLOWED_ARTIFACT_EXTENSIONS = {"jar", "war", "ear"}
+_ALLOWED_COMPRESSED_EXTENSIONS = {"zip", "gz", "tgz"}
+_MAX_ARTIFACT_SIZE = 100 * 1024 * 1024  # 100 MB (comprimido puede ser grande)
+
+
+def _decompress_to_artifact(file_bytes: bytes, filename: str) -> tuple[bytes, str]:
+    """
+    Si el archivo es un contenedor comprimido (.zip, .tar.gz, .tgz, .gz),
+    extrae el primer EAR/WAR/JAR que encuentre y lo retorna junto a su nombre.
+    Si ya es un artefacto Java directo, lo retorna tal cual.
+    Retorna (artifact_bytes, artifact_filename).
+    """
+    import gzip
+    import tarfile
+
+    name_lower = filename.lower()
+
+    # ── .tar.gz / .tgz ──────────────────────────────────────────────────────
+    if name_lower.endswith(".tar.gz") or name_lower.endswith(".tgz"):
+        try:
+            with tarfile.open(fileobj=io.BytesIO(file_bytes), mode="r:gz") as tf:
+                members = [m for m in tf.getmembers()
+                           if m.name.lower().endswith((".ear", ".war", ".jar")) and m.size > 0]
+                if not members:
+                    raise HTTPException(422, "No se encontró ningún EAR/WAR/JAR dentro del tar.gz")
+                # Preferir EAR > WAR > JAR
+                members.sort(key=lambda m: ({"ear": 0, "war": 1, "jar": 2}.get(m.name.rsplit(".", 1)[-1].lower(), 3), m.size * -1))
+                chosen = members[0]
+                f = tf.extractfile(chosen)
+                if not f:
+                    raise HTTPException(422, f"No se pudo leer {chosen.name} del archivo")
+                return f.read(), chosen.name.rsplit("/", 1)[-1]
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(422, f"Error descomprimiendo tar.gz: {str(e)[:120]}")
+
+    # ── .gz (solo un archivo, e.g. myapp.war.gz) ────────────────────────────
+    if name_lower.endswith(".gz"):
+        inner_name = filename[:-3]  # quitar .gz → myapp.war
+        inner_ext = inner_name.rsplit(".", 1)[-1].lower() if "." in inner_name else ""
+        if inner_ext not in _ALLOWED_ARTIFACT_EXTENSIONS:
+            raise HTTPException(422, f"El archivo .gz no contiene un artefacto Java reconocido (encontrado: .{inner_ext})")
+        try:
+            return gzip.decompress(file_bytes), inner_name
+        except Exception as e:
+            raise HTTPException(422, f"Error descomprimiendo .gz: {str(e)[:120]}")
+
+    # ── .zip ─────────────────────────────────────────────────────────────────
+    if name_lower.endswith(".zip"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+                candidates = [e for e in zf.namelist()
+                              if e.lower().endswith((".ear", ".war", ".jar"))
+                              and not e.startswith("__MACOSX")
+                              and zf.getinfo(e).file_size > 0]
+                if not candidates:
+                    raise HTTPException(422, "No se encontró ningún EAR/WAR/JAR dentro del ZIP")
+                # Preferir EAR > WAR > JAR; en empate, el más grande
+                candidates.sort(key=lambda e: (
+                    {"ear": 0, "war": 1, "jar": 2}.get(e.rsplit(".", 1)[-1].lower(), 3),
+                    -zf.getinfo(e).file_size
+                ))
+                chosen = candidates[0]
+                logger.info("[artifact] ZIP: extrayendo %s", chosen)
+                return zf.read(chosen), chosen.rsplit("/", 1)[-1]
+        except HTTPException:
+            raise
+        except zipfile.BadZipFile:
+            raise HTTPException(422, "El archivo ZIP está corrupto o no es un ZIP válido")
+        except Exception as e:
+            raise HTTPException(422, f"Error descomprimiendo ZIP: {str(e)[:120]}")
+
+    # ── Ya es un artefacto Java directo ──────────────────────────────────────
+    return file_bytes, filename
+
+
+@app.post("/analyze/artifact")
+@limiter.limit("20/hour;3/minute")
+async def analyze_artifact(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    _user: str = Depends(verify_auth)
+):
+    """
+    Recibe un artefacto Java (EAR/WAR/JAR) o un contenedor comprimido
+    (.zip, .tar.gz, .tgz, archivo.war.gz) con el artefacto dentro.
+    Extrae el inventario y lanza el análisis con 4 agentes.
+    """
+    filename = file.filename or "artifact.jar"
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    # .tar.gz tiene dos extensiones — tratarlo como un caso especial
+    if filename.lower().endswith(".tar.gz"):
+        ext = "tar.gz"
+
+    allowed_all = _ALLOWED_ARTIFACT_EXTENSIONS | _ALLOWED_COMPRESSED_EXTENSIONS | {"tar.gz"}
+    if ext not in allowed_all:
+        raise HTTPException(400,
+            f"Tipo no permitido (.{ext}). Se aceptan: JAR, WAR, EAR, ZIP, GZ, TAR.GZ")
+
+    file_bytes = await file.read()
+    if len(file_bytes) > _MAX_ARTIFACT_SIZE:
+        raise HTTPException(413, f"Archivo demasiado grande. Máximo: {_MAX_ARTIFACT_SIZE // (1024*1024)} MB")
+    if len(file_bytes) == 0:
+        raise HTTPException(400, "El archivo está vacío")
+
+    logger.info("[artifact] Recibido %s (%d KB) por %s", filename, len(file_bytes) // 1024, _user)
+
+    # Descomprimir si es necesario
+    artifact_bytes, artifact_name = _decompress_to_artifact(file_bytes, filename)
+    if artifact_name != filename:
+        logger.info("[artifact] Descomprimido: %s → %s (%d KB)", filename, artifact_name, len(artifact_bytes) // 1024)
+
+    inventory = _extract_artifact_inventory(artifact_bytes, artifact_name)
+    logger.info("[artifact] Inventario extraído: %d chars", len(inventory))
+    # Agregar contexto del archivo original si vino comprimido
+    if artifact_name != filename:
+        inventory = f"COMPRESSED_CONTAINER: {filename}\nEXTRACTED_ARTIFACT: {artifact_name}\n\n" + inventory
+
+    data_hash = _cache_key(inventory)
+    job_id = str(uuid.uuid4())
+    _update_job_status(job_id, "pending", "Inventario extraído, iniciando análisis con 4 agentes...")
+    background_tasks.add_task(_run_bedrock_job, job_id, inventory, artifact_name, data_hash, "general")
+
+    return {
+        "status": "pending",
+        "method": "async",
+        "job_id": job_id,
+        "artifact_name": artifact_name,           # nombre del artefacto Java (ya descomprimido)
+        "container_name": filename,               # nombre del archivo original subido
+        "was_compressed": artifact_name != filename,
+        "artifact_size_kb": len(artifact_bytes) // 1024,
+        "container_size_kb": len(file_bytes) // 1024,
+        "inventory_preview": inventory,
     }
 
 

@@ -90,8 +90,8 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
     <input id="login-user" type="text" placeholder="admin" style="width:100%;margin-bottom:.7rem" autocomplete="username">
     <label style="font-size:.68rem;color:var(--t2);display:block;margin-bottom:.3rem">Contraseña</label>
     <input id="login-pass" type="password" placeholder="••••••••" style="width:100%;margin-bottom:1.2rem"
-           autocomplete="current-password">
-    <button class="btn" style="width:100%;margin-top:0" id="login-btn">Ingresar</button>
+           autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="btn" style="width:100%;margin-top:0" onclick="doLogin()" id="login-btn">Ingresar</button>
   </div>
 </div>
 
@@ -153,11 +153,42 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
   </div>
 </div>
 
+<!-- ═══ Apps Detected Modal ══════════════════════════════════════════════════ -->
+<div id="apps-modal" style="display:none;position:fixed;inset:0;z-index:9600;background:rgba(0,0,0,.85);align-items:center;justify-content:center">
+  <div style="background:#111827;border:1px solid var(--bdr);border-radius:18px;padding:2rem;width:520px;max-width:94vw;box-shadow:0 30px 80px rgba(0,0,0,.7)">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.2rem">
+      <div>
+        <div style="font-size:.7rem;font-weight:700;color:var(--blue);letter-spacing:.08em;margin-bottom:.3rem">INVENTARIO COMPLETADO</div>
+        <h3 style="font-size:1rem;margin:0">Aplicaciones detectadas en el servidor</h3>
+      </div>
+      <button onclick="document.getElementById('apps-modal').style.display='none'" style="background:none;border:none;color:var(--t2);cursor:pointer;font-size:1.2rem;line-height:1;padding:.2rem">✕</button>
+    </div>
+
+    <p style="font-size:.78rem;color:var(--t2);margin-bottom:1rem">Selecciona las aplicaciones que deseas incluir en el análisis de modernización:</p>
+
+    <div id="apps-list" style="max-height:280px;overflow-y:auto;display:flex;flex-direction:column;gap:.5rem;margin-bottom:1.2rem"></div>
+
+    <div style="background:rgba(255,255,255,.04);border:1px solid var(--bdr);border-radius:10px;padding:.7rem 1rem;margin-bottom:1.2rem;display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:.73rem;color:var(--t2)">Inventario completo del servidor incluido siempre</span>
+      <span id="apps-selected-count" style="font-size:.8rem;font-weight:700;color:var(--green)">0 seleccionadas</span>
+    </div>
+
+    <div style="display:flex;gap:.7rem">
+      <button id="apps-analyze-btn" class="btn" style="flex:2;margin-top:0" onclick="confirmAppsAndAnalyze()">
+        Analizar seleccionadas
+      </button>
+      <button onclick="confirmAppsAndAnalyze(true)" style="flex:1;background:rgba(255,255,255,.06);border:1px solid var(--bdr);padding:.65rem 1rem;border-radius:10px;color:var(--t1);cursor:pointer;font-size:.8rem;font-weight:600">
+        Analizar todo
+      </button>
+    </div>
+  </div>
+</div>
+
 <!-- ═══ Chat Panel ════════════════════════════════════════════════════════════ -->
 <div id="chat-panel" style="display:none;position:fixed;right:1.5rem;bottom:5rem;width:380px;z-index:1000;flex-direction:column;background:var(--bg);border:1px solid var(--purple);border-radius:16px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
   <div style="background:linear-gradient(135deg,rgba(0,210,255,.12),rgba(157,80,187,.15));padding:.8rem 1rem;display:flex;align-items:center;justify-content:space-between">
     <div>
-      <div style="font-weight:700;font-size:.88rem">Chat con Blueprint</div>
+      <div style="font-weight:700;font-size:.88rem">Chat con Herny</div>
       <div style="font-size:.62rem;color:var(--t2)" id="chat-scan-label">Sin analisis activo</div>
     </div>
     <button onclick="toggleChat()" style="background:none;border:none;color:var(--t2);cursor:pointer;font-size:1.1rem;line-height:1">✕</button>
@@ -181,6 +212,7 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
     <li class="navli" id="n3" onclick="sw(3)">📦 IaC Generator</li>
     <li class="navli" id="n4" onclick="sw(4)">⏳ Historial de Escaneos</li>
     <li class="navli" id="n5" onclick="sw(5)">📊 Dashboard Ejecutivo</li>
+    <li class="navli" id="n-lab" onclick="sw('lab')">🧪 Laboratorio Local</li>
   </ul>
   <div style="margin-top:auto">
     <div style="padding:.5rem .8rem;background:rgba(0,0,0,.3);border-radius:8px;margin-bottom:.4rem;font-size:.7rem;color:var(--t2);display:flex;justify-content:space-between;align-items:center">
@@ -207,6 +239,7 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
     <div style="display:flex;gap:.5rem;margin-bottom:.8rem;border-bottom:1px solid var(--bdr);padding-bottom:.8rem">
       <button class="modetab on" id="tab-ssh" onclick="setMode('ssh')">🔌 Conexion SSH Directa</button>
       <button class="modetab" id="tab-manual" onclick="setMode('manual')">📋 Pegar Datos Manual</button>
+      <button class="modetab" id="tab-artifact" onclick="setMode('artifact')">☕ Artefacto Java</button>
       <div style="margin-left:auto;display:flex;align-items:center;gap:.5rem">
         <label style="font-size:.68rem;color:var(--t2);white-space:nowrap">Industria:</label>
         <select id="industry-select" style="background:rgba(0,0,0,.5);border:1px solid var(--bdr);border-radius:7px;padding:.35rem .6rem;color:#fff;font-size:.73rem;cursor:pointer">
@@ -217,6 +250,11 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
           <option value="manufactura">Manufactura (IEC 62443)</option>
           <option value="telecomunicaciones">Telecomunicaciones (CALEA)</option>
           <option value="gobierno">Gobierno (FedRAMP / FISMA)</option>
+        </select>
+        <label style="font-size:.68rem;color:var(--t2);white-space:nowrap;margin-left:.5rem">Ambiente:</label>
+        <select id="env-select" style="background:rgba(0,0,0,.5);border:1px solid var(--bdr);border-radius:7px;padding:.35rem .6rem;color:#fff;font-size:.73rem;cursor:pointer">
+          <option value="prod">Producción (24/7)</option>
+          <option value="dev">Desarrollo/QA (L-V 10h)</option>
         </select>
       </div>
     </div>
@@ -267,6 +305,25 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
       <p style="color:var(--t2);font-size:.78rem;margin-bottom:.6rem">Pega la salida completa de collector.sh</p>
       <textarea id="raw" placeholder="--- START CLOUD MODERNIZATION INVENTORY ---"></textarea>
       <button class="btn" id="analbtn" onclick="run()">🔍 Analizar Datos</button>
+    </div>
+    <div id="mode-artifact" style="display:none">
+      <p style="color:var(--t2);font-size:.78rem;margin-bottom:.8rem">Sube un artefacto Java para análisis estático de dependencias, vulnerabilidades y estrategia de modernización</p>
+      <div id="artifact-drop-zone"
+           style="border:2px dashed var(--purple);border-radius:12px;padding:2rem;text-align:center;cursor:pointer;transition:.3s;background:rgba(157,80,187,.05)"
+           onclick="document.getElementById('artifact-file-input').click()"
+           ondragover="event.preventDefault();this.style.borderColor='var(--blue)'"
+           ondragleave="this.style.borderColor='var(--purple)'"
+           ondrop="handleArtifactDrop(event)">
+        <div style="font-size:2rem;margin-bottom:.5rem">☕</div>
+        <div style="font-size:.9rem;color:#fff;font-weight:600">Arrastra tu EAR / WAR / JAR aquí</div>
+        <div style="font-size:.72rem;color:var(--t2);margin-top:.3rem">o haz click para seleccionar — JAR · WAR · EAR · ZIP · GZ · TAR.GZ — máx. 100 MB</div>
+        <input type="file" id="artifact-file-input" accept=".ear,.war,.jar,.zip,.gz,.tgz" style="display:none" onchange="handleArtifactSelect(this.files[0])">
+      </div>
+      <div id="artifact-file-info" style="display:none;margin-top:.8rem;background:rgba(0,210,255,.08);border:1px solid var(--blue);border-radius:8px;padding:.6rem .9rem;font-size:.78rem">
+        <span id="artifact-file-name" style="color:var(--blue);font-weight:600"></span>
+        <span id="artifact-file-size" style="color:var(--t2);margin-left:.5rem"></span>
+      </div>
+      <button class="btn" id="artifact-btn" onclick="uploadArtifact()" style="margin-top:.8rem;display:none">☕ Analizar Artefacto</button>
     </div>
   </div>
 
@@ -389,6 +446,36 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
       <h3 style="font-size:.9rem">Remediación de Código</h3>
       <div id="remed-list" style="margin-top:.8rem;display:flex;flex-direction:column;gap:.8rem"></div>
     </div>
+
+    <!-- Java Findings (CVEs + vulnerabilidades) -->
+    <div class="card pt" id="java-findings-box" style="display:none">
+      <h3 style="font-size:.95rem;margin-bottom:.8rem">☕ Hallazgos Java — CVEs y Vulnerabilidades</h3>
+      <div id="java-findings-list" style="display:flex;flex-direction:column;gap:.5rem"></div>
+    </div>
+
+    <!-- Code Transformation (JEE → Spring Boot) -->
+    <div class="card pt" id="code-transform-box" style="display:none">
+      <h3 style="font-size:.95rem;margin-bottom:.8rem">🔄 Transformación de Código — JEE a Spring Boot</h3>
+      <div id="code-transform-list" style="display:flex;flex-direction:column;gap:.8rem"></div>
+    </div>
+
+    <!-- SQL Analysis -->
+    <div class="card pt" id="sql-analysis-box" style="display:none">
+      <h3 style="font-size:.95rem;margin-bottom:.8rem">🗄 SQL Detectado en Bytecode</h3>
+      <div id="sql-analysis-list" style="display:flex;flex-direction:column;gap:.6rem"></div>
+    </div>
+
+    <!-- Externalization (JNDI, JDBC, configs) -->
+    <div class="card pt" id="externalization-box" style="display:none">
+      <h3 style="font-size:.95rem;margin-bottom:.8rem">🔧 Externalización de Configuración</h3>
+      <div id="externalization-list" style="display:flex;flex-direction:column;gap:.5rem"></div>
+    </div>
+
+    <!-- Containerization -->
+    <div class="card pt" id="java-container-box" style="display:none">
+      <h3 style="font-size:.95rem;margin-bottom:.6rem">🐳 Containerización del Artefacto</h3>
+      <div id="java-container-content"></div>
+    </div>
   </div>
 
   <div class="page" id="p3">
@@ -464,6 +551,191 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
       <div class="card"><h3 style="font-size:.9rem">Kubernetes</h3><pre id="k8s"></pre></div>
     </div>
     <div class="card"><h3 style="font-size:.9rem">Dockerfile</h3><pre id="dock"></pre></div>
+
+    <!-- ── CloudNative Agent — Artefactos de Migración ── -->
+    <div id="cloudnative-panel" style="display:none;margin-top:1.2rem">
+      <div style="display:flex;align-items:center;gap:.7rem;margin-bottom:1rem;flex-wrap:wrap">
+        <h3 style="font-size:1rem;margin:0">🚀 Artefactos Cloud-Native Generados por IA</h3>
+        <span style="font-size:.65rem;background:rgba(0,255,150,.15);color:var(--green);padding:.2rem .6rem;border-radius:10px;border:1px solid rgba(0,255,150,.3)">Listos para desplegar</span>
+      </div>
+
+      <!-- Bloqueadores + 12-Factor -->
+      <div class="g2" style="margin-bottom:1rem">
+        <div class="card" id="cn-blockers-box" style="display:none">
+          <h4 style="font-size:.85rem;color:var(--red);margin-bottom:.6rem">🚫 Bloqueadores de Containerización</h4>
+          <div id="cn-blockers-list"></div>
+        </div>
+        <div class="card" id="cn-12factor-box" style="display:none">
+          <h4 style="font-size:.85rem;color:var(--yellow);margin-bottom:.6rem">12-Factor App — Violaciones</h4>
+          <div id="cn-12factor-list"></div>
+        </div>
+      </div>
+
+      <!-- Dockerfile Multi-stage -->
+      <div class="card" id="cn-dockerfile-box" style="display:none;margin-bottom:1rem">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.6rem;flex-wrap:wrap;gap:.4rem">
+          <h4 style="font-size:.85rem;margin:0">🐳 Dockerfile Multi-stage</h4>
+          <button class="bsm" onclick="_copyCode('cn-dockerfile-pre','Dockerfile')">Copiar</button>
+        </div>
+        <pre id="cn-dockerfile-pre" style="font-size:.68rem;background:rgba(0,0,0,.5);border:1px solid rgba(0,163,255,.2);padding:.8rem;border-radius:6px;overflow-x:auto;max-height:320px;line-height:1.5"></pre>
+      </div>
+
+      <!-- docker-compose -->
+      <div class="card" id="cn-compose-box" style="display:none;margin-bottom:1rem">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.6rem;flex-wrap:wrap;gap:.4rem">
+          <h4 style="font-size:.85rem;margin:0">🔧 docker-compose.yml — Desarrollo Local</h4>
+          <button class="bsm" onclick="_copyCode('cn-compose-pre','docker-compose.yml')">Copiar</button>
+        </div>
+        <pre id="cn-compose-pre" style="font-size:.68rem;background:rgba(0,0,0,.5);border:1px solid rgba(0,176,155,.2);padding:.8rem;border-radius:6px;overflow-x:auto;max-height:280px;line-height:1.5"></pre>
+      </div>
+
+      <!-- K8s Manifests -->
+      <div class="card" id="cn-k8s-box" style="display:none;margin-bottom:1rem">
+        <h4 style="font-size:.85rem;margin-bottom:.6rem">☸ Manifiestos Kubernetes</h4>
+        <div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.5rem">
+          <button class="bsm" onclick="showK8sTab('deployment')" id="k8s-tab-dep" style="opacity:1">Deployment</button>
+          <button class="bsm" onclick="showK8sTab('service')"    id="k8s-tab-svc" style="opacity:.5">Service</button>
+          <button class="bsm" onclick="showK8sTab('hpa')"        id="k8s-tab-hpa" style="opacity:.5">HPA</button>
+          <button class="bsm" onclick="_copyCode('cn-k8s-pre','manifest.yaml')" style="margin-left:auto">Copiar</button>
+        </div>
+        <pre id="cn-k8s-pre" style="font-size:.68rem;background:rgba(0,0,0,.5);border:1px solid rgba(149,125,255,.2);padding:.8rem;border-radius:6px;overflow-x:auto;max-height:280px;line-height:1.5"></pre>
+      </div>
+
+      <!-- Código Refactorizado -->
+      <div class="card" id="cn-refactor-box" style="display:none;margin-bottom:1rem">
+        <h4 style="font-size:.85rem;margin-bottom:.6rem">✏️ Código Refactorizado para Cloud-Native</h4>
+        <div id="cn-refactor-list" style="display:flex;flex-direction:column;gap:.7rem"></div>
+      </div>
+
+      <!-- Terraform Managed Services (RDS Aurora + ECS Fargate) -->
+      <div class="card" id="cn-terraform-box" style="display:none;margin-bottom:1rem">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.6rem;flex-wrap:wrap;gap:.4rem">
+          <h4 style="font-size:.85rem;margin:0">🏗 Terraform — RDS Aurora + ECS Fargate</h4>
+          <button class="bsm" onclick="_copyCode('cn-terraform-pre','main.tf')">Copiar</button>
+        </div>
+        <pre id="cn-terraform-pre" style="font-size:.65rem;background:rgba(0,0,0,.5);border:1px solid rgba(149,125,255,.2);padding:.8rem;border-radius:6px;overflow-x:auto;max-height:300px;line-height:1.5"></pre>
+      </div>
+
+      <!-- Comandos de Despliegue + Healthchecks -->
+      <div class="g2">
+        <div class="card" id="cn-commands-box" style="display:none">
+          <h4 style="font-size:.85rem;margin-bottom:.6rem">▶ Comandos de Despliegue</h4>
+          <div id="cn-commands-list"></div>
+        </div>
+        <div class="card" id="cn-health-box" style="display:none">
+          <h4 style="font-size:.85rem;margin-bottom:.6rem">❤ Healthchecks K8s</h4>
+          <div id="cn-health-content"></div>
+        </div>
+      </div>
+
+      <!-- Business / FinOps (TCO) -->
+      <div id="cn-business-box" style="display:none;margin-top:1rem">
+        <h4 style="font-size:.9rem;margin-bottom:.7rem;color:var(--blue)">💰 Análisis Financiero — TCO Legacy vs AWS</h4>
+        <div id="cn-csuite" style="font-size:.8rem;color:#e0e0e0;background:rgba(0,163,255,.05);border:1px solid rgba(0,163,255,.2);border-radius:8px;padding:.7rem 1rem;margin-bottom:.8rem;line-height:1.7"></div>
+        <div class="g2" style="margin-bottom:.7rem">
+          <div class="card" style="padding:.8rem">
+            <div style="font-size:.65rem;color:var(--t2);font-weight:700;margin-bottom:.5rem">COSTO LEGACY (anual)</div>
+            <div id="cn-tco-legacy"></div>
+          </div>
+          <div class="card" style="padding:.8rem">
+            <div style="font-size:.65rem;color:var(--green);font-weight:700;margin-bottom:.5rem">COSTO AWS (anual)</div>
+            <div id="cn-tco-aws"></div>
+          </div>
+        </div>
+        <div class="card" style="padding:.8rem" id="cn-roi-box">
+          <div style="font-size:.65rem;color:var(--t2);font-weight:700;margin-bottom:.5rem">ROI PROYECTADO</div>
+          <div id="cn-roi-content" style="display:flex;gap:2rem;flex-wrap:wrap"></div>
+        </div>
+      </div>
+
+      <!-- Diagrama TO-BE (AWS Architecture) -->
+      <div class="card" id="cn-tobe-box" style="display:none;margin-top:1rem">
+        <h4 style="font-size:.85rem;margin-bottom:.6rem">☁ Arquitectura TO-BE en AWS</h4>
+        <div class="mermaid" id="cn-tobe-diagram"></div>
+      </div>
+
+      <!-- SRE Runbooks -->
+      <div class="card" id="cn-runbook-box" style="display:none;margin-top:1rem">
+        <h4 style="font-size:.85rem;margin-bottom:.6rem">📋 Runbooks SRE — Post-Deploy</h4>
+        <div id="cn-runbook-list" style="display:flex;flex-direction:column;gap:.6rem"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Tab Laboratorio Local ────────────────────────────────────────────── -->
+  <div class="page" id="p-lab" style="display:none">
+    <div style="display:flex;align-items:center;gap:.8rem;margin-bottom:1rem;flex-wrap:wrap">
+      <h3 style="font-size:1rem;margin:0">🧪 Laboratorio Local — Prueba sin conexión a AWS</h3>
+      <span style="font-size:.65rem;background:rgba(149,125,255,.15);color:#9d7dff;padding:.2rem .6rem;border-radius:10px;border:1px solid rgba(149,125,255,.3)">LocalStack + Docker Compose</span>
+    </div>
+    <div class="card" style="background:rgba(149,125,255,.05);border:1px solid rgba(149,125,255,.2);margin-bottom:1rem;padding:.8rem 1rem">
+      <p style="font-size:.78rem;color:#ddd;margin:0;line-height:1.7">
+        Levanta un entorno local que emula los servicios AWS (S3, Secrets Manager, SQS, SSM)
+        usando <b>LocalStack</b>. La app corre contra estos servicios locales sin necesitar
+        credenciales de AWS. Ideal para que el equipo de desarrollo pruebe la migración en su PC.
+      </p>
+    </div>
+
+    <div id="lab-empty" style="text-align:center;padding:3rem;color:var(--t2);font-size:.8rem">
+      Analiza un artefacto Java primero para generar el entorno LocalStack
+    </div>
+
+    <div id="lab-content" style="display:none">
+      <!-- docker-compose LocalStack -->
+      <div class="card" id="lab-compose-box" style="margin-bottom:1rem">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.6rem;flex-wrap:wrap;gap:.4rem">
+          <h4 style="font-size:.85rem;margin:0">docker-compose.localstack.yml</h4>
+          <div style="display:flex;gap:.4rem">
+            <button class="bsm" onclick="_copyCode('lab-compose-pre','docker-compose.localstack.yml')">Copiar</button>
+            <button class="bsm" onclick="_downloadFile('lab-compose-pre','docker-compose.localstack.yml')" style="background:rgba(149,125,255,.15);border-color:#9d7dff;color:#9d7dff">Descargar</button>
+          </div>
+        </div>
+        <pre id="lab-compose-pre" style="font-size:.67rem;background:rgba(0,0,0,.5);border:1px solid rgba(149,125,255,.2);padding:.8rem;border-radius:6px;overflow-x:auto;max-height:340px;line-height:1.5"></pre>
+      </div>
+
+      <!-- Pasos para levantar -->
+      <div class="card" style="margin-bottom:1rem">
+        <h4 style="font-size:.85rem;margin-bottom:.6rem">▶ Cómo levantar el laboratorio</h4>
+        <div style="display:flex;flex-direction:column;gap:.4rem">
+          <div style="background:rgba(0,0,0,.4);border-radius:6px;padding:.5rem .8rem">
+            <div style="font-size:.6rem;color:var(--t2);margin-bottom:.15rem">PASO 1 — Instalar LocalStack CLI</div>
+            <code style="font-size:.68rem;color:var(--green)">pip install localstack && localstack start</code>
+          </div>
+          <div style="background:rgba(0,0,0,.4);border-radius:6px;padding:.5rem .8rem">
+            <div style="font-size:.6rem;color:var(--t2);margin-bottom:.15rem">PASO 2 — Levantar el stack completo</div>
+            <code style="font-size:.68rem;color:var(--green)">docker-compose -f docker-compose.localstack.yml up -d</code>
+          </div>
+          <div style="background:rgba(0,0,0,.4);border-radius:6px;padding:.5rem .8rem">
+            <div style="font-size:.6rem;color:var(--t2);margin-bottom:.15rem">PASO 3 — Verificar que la app responde</div>
+            <code style="font-size:.68rem;color:var(--green)">curl http://localhost:8080/actuator/health</code>
+          </div>
+          <div style="background:rgba(0,0,0,.4);border-radius:6px;padding:.5rem .8rem">
+            <div style="font-size:.6rem;color:var(--t2);margin-bottom:.15rem">PASO 4 — Verificar servicios AWS emulados</div>
+            <code style="font-size:.68rem;color:var(--green)">aws --endpoint-url=http://localhost:4566 secretsmanager list-secrets</code>
+          </div>
+        </div>
+      </div>
+
+      <!-- Diferencias LocalStack vs AWS Real -->
+      <div class="card">
+        <h4 style="font-size:.85rem;margin-bottom:.6rem">⚡ LocalStack vs AWS Real</h4>
+        <table style="width:100%;font-size:.73rem;border-collapse:collapse">
+          <thead>
+            <tr style="border-bottom:1px solid var(--bdr)">
+              <th style="text-align:left;padding:.3rem;color:var(--t2)">Servicio</th>
+              <th style="text-align:center;padding:.3rem;color:var(--t2)">LocalStack</th>
+              <th style="text-align:center;padding:.3rem;color:var(--t2)">AWS Real</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td style="padding:.3rem">Secrets Manager</td><td style="text-align:center;color:var(--green)">✓ Free</td><td style="text-align:center;color:var(--blue)">$0.40/secret/mes</td></tr>
+            <tr><td style="padding:.3rem">S3</td><td style="text-align:center;color:var(--green)">✓ Free</td><td style="text-align:center;color:var(--blue)">$0.023/GB</td></tr>
+            <tr><td style="padding:.3rem">SQS</td><td style="text-align:center;color:var(--green)">✓ Free</td><td style="text-align:center;color:var(--blue)">$0.40/M msgs</td></tr>
+            <tr><td style="padding:.3rem">RDS Aurora</td><td style="text-align:center;color:var(--yellow)">PostgreSQL local</td><td style="text-align:center;color:var(--blue)">Serverless v2</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
   </div>
 
 
@@ -551,27 +823,7 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
 </main>
 </div>
 
-<script>
-  // Conecta eventos de login una vez que app.js (module) haya cargado
-  // Necesario porque type="module" carga en diferido y los inline onclick fallan
-  (function wireLogin() {
-    const MAX_WAIT = 3000; // ms
-    const start = Date.now();
-    function attach() {
-      const btn  = document.getElementById('login-btn');
-      const pass = document.getElementById('login-pass');
-      if (btn && pass && typeof window.doLogin === 'function') {
-        btn.addEventListener('click', () => window.doLogin());
-        pass.addEventListener('keydown', e => { if (e.key === 'Enter') window.doLogin(); });
-      } else if (Date.now() - start < MAX_WAIT) {
-        setTimeout(attach, 80);
-      }
-    }
-    document.addEventListener('DOMContentLoaded', attach);
-  })();
-</script>
 <script type="module" src="app.js"></script>
-
 </body>
 </html>
 

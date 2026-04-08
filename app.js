@@ -6,6 +6,7 @@ let lastScanId        = null;
 let lastDetectedTechs = [];
 let lastFindings      = [];
 let lastHost          = '';
+let lastEnvType       = 'prod';
 
 // ─── Auth Helpers ─────────────────────────────────────────────────────────────
 function authHeaders(extra = {}) {
@@ -158,41 +159,36 @@ function setAiStatus(type, msg) {
 
 // ─── Job Polling ──────────────────────────────────────────────────────────────
 async function pollJobStatus(job_id, sh, apiUrl) {
-    let attempts = 0;
-    const MAX = 90; // 3 min max (90 intentos × 2s)
-
-    const poll = async () => {
-        if (attempts++ >= MAX) {
-            setAiStatus('error', '✗ Timeout — usando análisis local');
-            window.updateAiFields(null, sh);
-            return;
-        }
+    const token = sessionStorage.getItem('mf_token') || 'mf-api-key-2026';
+    const source = new EventSource(`${apiUrl}/stream/${job_id}?token=${token}`);
+    
+    source.onmessage = function(event) {
         try {
-            const r = await fetch(`${apiUrl}/status/${job_id}`, {
-                headers: { 'X-API-KEY': 'mf-api-key-2026' }
-            });
-            if (!r.ok) { setTimeout(poll, 3000); return; }
-            const s = await r.json();
-
+            const s = JSON.parse(event.data);
+            
             if (s.status === 'completed') {
                 setAiStatus('done', `✓ ${s.model_used || 'AI'} — análisis listo`);
                 lastScanId = s.scan_id || null;
                 _activateScanActions(lastScanId, sh);
                 window.updateAiFields(s.ai_content, sh);
-            } else if (s.status === 'failed') {
-                setAiStatus('error', `✗ ${s.error ? s.error.slice(0, 80) : 'Error IA'}`);
+                source.close();
+            } else if (s.status === 'failed' || s.status === 'error') {
+                setAiStatus('error', `✗ ${s.error ? s.error.slice(0, 80) : s.message || 'Error IA'}`);
                 window.updateAiFields(null, sh);
                 _activateScanActions(lastScanId, sh);
+                source.close();
             } else {
                 setAiStatus('running', `⟳ ${s.message || 'Procesando...'}`);
-                setTimeout(poll, 2000);
             }
         } catch(e) {
-            setTimeout(poll, 3000);
+            console.error('SSE parse error:', e);
         }
     };
 
-    setTimeout(poll, 2000);
+    source.onerror = function() {
+        setAiStatus('error', '✗ Error de conexión con el stream');
+        source.close();
+    };
 }
 
 // ─── Generadores de diagramas (siempre válidos) ───────────────────────────────
@@ -816,12 +812,13 @@ CMD ["${runCmd.split(' ')[0]}"${runCmd.split(' ').slice(1).map(a => `, "${a}"`).
 
 function _renderIaC(techs, host) {
     const aiData = lastAiData || {};
+    const cn     = aiData.cloudnative || {};
     const tfEl   = document.getElementById('tf');
     const k8sEl  = document.getElementById('k8s');
     const dockEl = document.getElementById('dock');
-    if (tfEl)   tfEl.innerText   = aiData.terraform_code || _buildTerraform(techs, host);
-    if (k8sEl)  k8sEl.innerText  = aiData.k8s_yaml       || _buildK8sYaml(techs, host);
-    if (dockEl) dockEl.innerText = aiData.dockerfile      || _buildDockerfile(techs);
+    if (tfEl)   tfEl.innerText   = aiData.terraform_code    || cn.terraform_managed_services || _buildTerraform(techs, host);
+    if (k8sEl)  k8sEl.innerText  = aiData.k8s_yaml          || cn.k8s_deployment             || _buildK8sYaml(techs, host);
+    if (dockEl) dockEl.innerText = aiData.dockerfile         || cn.dockerfile                 || _buildDockerfile(techs);
 }
 
 window.triggerMermaid = async function() {
@@ -892,8 +889,16 @@ window.sw = function(i) {
       if(pg) pg.style.display='none';
       if(t) t.classList.remove('on');
   }
-  let p=document.getElementById('p'+i);
-  let n=document.getElementById('n'+i);
+  // also hide/deactivate lab page
+  const labPg = document.getElementById('p-lab');
+  const labNv = document.getElementById('n-lab');
+  if(labPg) labPg.style.display='none';
+  if(labNv) labNv.classList.remove('on');
+
+  const pageId = i === 'lab' ? 'p-lab' : 'p'+i;
+  const navId  = i === 'lab' ? 'n-lab' : 'n'+i;
+  let p=document.getElementById(pageId);
+  let n=document.getElementById(navId);
   if(p) p.style.display='block';
   if(n) n.classList.add('on');
 
@@ -905,6 +910,12 @@ window.sw = function(i) {
   }
   if (i === 3) {
       _renderIaC(lastDetectedTechs, lastHost);
+      setTimeout(() => {
+          const el = document.getElementById('cn-tobe-diagram');
+          if (el && el.innerText.trim() && window.mermaid) {
+              try { el.removeAttribute('data-processed'); window.mermaid.init(undefined, el); } catch(e) {}
+          }
+      }, 100);
   }
 };
 
@@ -934,10 +945,187 @@ window.exportReport = function() {
 };
 
 window.setMode = function(m) {
-  document.getElementById('mode-ssh').style.display = m === 'ssh' ? 'block' : 'none';
-  document.getElementById('mode-manual').style.display = m === 'manual' ? 'block' : 'none';
+  document.getElementById('mode-ssh').style.display    = m === 'ssh'      ? 'block' : 'none';
+  document.getElementById('mode-manual').style.display = m === 'manual'   ? 'block' : 'none';
+  document.getElementById('mode-artifact').style.display = m === 'artifact' ? 'block' : 'none';
   document.getElementById('tab-ssh').classList.toggle('on', m === 'ssh');
   document.getElementById('tab-manual').classList.toggle('on', m === 'manual');
+  document.getElementById('tab-artifact').classList.toggle('on', m === 'artifact');
+};
+
+// ─── Apps Detected Modal ──────────────────────────────────────────────────────
+const _APP_PATTERNS = [
+    { key: 'tomcat',      label: 'Apache Tomcat',    icon: '🐱', regex: /tomcat[\s\/\-]*([\d.]+)/i },
+    { key: 'jboss',       label: 'JBoss / WildFly',  icon: '🔴', regex: /(?:jboss|wildfly)[\s\/\-]*([\d.]+)/i },
+    { key: 'weblogic',    label: 'WebLogic',          icon: '🔷', regex: /weblogic[\s\/\-]*([\d.]+)/i },
+    { key: 'websphere',   label: 'WebSphere',         icon: '🔵', regex: /websphere[\s\/\-]*([\d.]+)/i },
+    { key: 'glassfish',   label: 'GlassFish / Payara',icon: '🐟', regex: /(?:glassfish|payara)[\s\/\-]*([\d.]+)/i },
+    { key: 'spring',      label: 'Spring Boot',       icon: '🌿', regex: /spring[\-\s]boot[\s\/\-]*([\d.]+)?/i },
+    { key: 'oracle',      label: 'Oracle DB',         icon: '🗄️', regex: /oracle[\s\/\-]*([\d.]+)/i },
+    { key: 'mysql',       label: 'MySQL',             icon: '🐬', regex: /mysql[\s\/\-]*([\d.]+)/i },
+    { key: 'postgres',    label: 'PostgreSQL',        icon: '🐘', regex: /postgres(?:ql)?[\s\/\-]*([\d.]+)/i },
+    { key: 'nginx',       label: 'Nginx',             icon: '🟩', regex: /nginx[\s\/\-]*([\d.]+)/i },
+    { key: 'apache',      label: 'Apache HTTPD',      icon: '🪶', regex: /apache[\s\/\-]*([\d.]+)/i },
+    { key: 'iis',         label: 'IIS',               icon: '🪟', regex: /iis[\s\/\-]*([\d.]+)?/i },
+    { key: 'nifi',        label: 'Apache NiFi',       icon: '🌊', regex: /nifi[\s\/\-]*([\d.]+)/i },
+    { key: 'kafka',       label: 'Kafka',             icon: '📨', regex: /kafka[\s\/\-]*([\d.]+)/i },
+    { key: 'redis',       label: 'Redis',             icon: '🔴', regex: /redis[\s\/\-]*([\d.]+)/i },
+    { key: 'nodejs',      label: 'Node.js',           icon: '🟢', regex: /node[\s\/\-]*(v?[\d.]+)/i },
+    { key: 'python',      label: 'Python / Django',   icon: '🐍', regex: /python[\s\/\-]*([\d.]+)/i },
+    { key: 'dotnet',      label: '.NET / ASP.NET',    icon: '💜', regex: /(?:\.net|aspnet)[\s\/\-]*([\d.]+)?/i },
+    { key: 'osb',         label: 'Oracle Service Bus', icon: '🚌', regex: /oracle service bus|osb[\s\/\-]*([\d.]+)?/i },
+];
+
+function _detectApps(inventoryText) {
+    const found = [];
+    for (const app of _APP_PATTERNS) {
+        const m = inventoryText.match(app.regex);
+        if (m) {
+            found.push({ ...app, version: m[1] || 'detectado' });
+        }
+    }
+    return found;
+}
+
+window._updateAppsCount = function() {
+    const checked = document.querySelectorAll('#apps-list input[type=checkbox]:checked').length;
+    const el = document.getElementById('apps-selected-count');
+    if (el) el.innerText = `${checked} seleccionada${checked !== 1 ? 's' : ''}`;
+};
+
+function _showAppsModal(inventoryText) {
+    const apps = _detectApps(inventoryText);
+    const modal = document.getElementById('apps-modal');
+    const list  = document.getElementById('apps-list');
+    if (!modal || !list) { run(); return; }
+
+    if (apps.length === 0) {
+        // Sin apps reconocidas — saltar el modal y analizar directamente
+        run();
+        return;
+    }
+
+    list.innerHTML = apps.map(app => `
+        <label style="display:flex;align-items:center;gap:.8rem;background:rgba(255,255,255,.04);border:1px solid var(--bdr);border-radius:10px;padding:.65rem .9rem;cursor:pointer;transition:.2s"
+               onmouseover="this.style.borderColor='var(--blue)'" onmouseout="this.style.borderColor='var(--bdr)'">
+          <input type="checkbox" data-app="${app.key}" checked
+                 style="width:1rem;height:1rem;accent-color:var(--blue);cursor:pointer"
+                 onchange="_updateAppsCount()">
+          <span style="font-size:1.1rem">${app.icon}</span>
+          <div style="flex:1">
+            <div style="font-size:.83rem;font-weight:600;color:#fff">${app.label}</div>
+            <div style="font-size:.7rem;color:var(--t2)">Versión: ${app.version}</div>
+          </div>
+          <span style="font-size:.65rem;font-weight:700;color:var(--blue);background:rgba(0,210,255,.1);border:1px solid var(--blue);padding:.15rem .5rem;border-radius:20px">DETECTADO</span>
+        </label>
+    `).join('');
+
+    _updateAppsCount();
+    modal.style.display = 'flex';
+}
+
+window.confirmAppsAndAnalyze = function(analyzeAll = false) {
+    const modal = document.getElementById('apps-modal');
+    if (modal) modal.style.display = 'none';
+    // No se modifica el textarea — el inventario completo se analiza siempre.
+    // La selección es informativa para el usuario, no filtra el análisis.
+    run();
+};
+
+// ─── Java Artifact Upload ──────────────────────────────────────────────────────
+let _selectedArtifact = null;
+
+function _setArtifactFile(file) {
+    if (!file) return;
+    const allowed = ['jar', 'war', 'ear', 'zip', 'gz', 'tgz'];
+    const nameLower = file.name.toLowerCase();
+    const ext = nameLower.endsWith('.tar.gz') ? 'tar.gz' : nameLower.split('.').pop();
+    if (!allowed.includes(ext) && ext !== 'tar.gz') {
+        alert('Solo se aceptan: JAR, WAR, EAR, ZIP, GZ, TAR.GZ');
+        return;
+    }
+    if (file.size > 100 * 1024 * 1024) {
+        alert('El archivo supera el límite de 100 MB');
+        return;
+    }
+    _selectedArtifact = file;
+    document.getElementById('artifact-file-name').innerText = file.name;
+    document.getElementById('artifact-file-size').innerText = `(${(file.size / 1024).toFixed(0)} KB)`;
+    document.getElementById('artifact-file-info').style.display = 'block';
+    document.getElementById('artifact-btn').style.display = 'inline-block';
+    document.getElementById('artifact-drop-zone').style.borderColor = 'var(--blue)';
+}
+
+window.handleArtifactSelect = function(file) { _setArtifactFile(file); };
+
+window.handleArtifactDrop = function(event) {
+    event.preventDefault();
+    document.getElementById('artifact-drop-zone').style.borderColor = 'var(--purple)';
+    const file = event.dataTransfer.files[0];
+    _setArtifactFile(file);
+};
+
+window.uploadArtifact = async function() {
+    if (!_selectedArtifact) return;
+
+    const btn = document.getElementById('artifact-btn');
+    btn.disabled = true;
+    btn.innerText = 'Subiendo...';
+    setAiStatus('running', '⟳ Extrayendo inventario del artefacto...');
+
+    const apiUrl = window.API_URL || 'http://localhost:8000';
+    const fd = new FormData();
+    fd.append('file', _selectedArtifact);
+
+    try {
+        const r = await apiFetch(`${apiUrl}/analyze/artifact`, { method: 'POST', body: fd });
+        if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            setAiStatus('error', `✗ ${err.detail || 'Error al subir artefacto'}`);
+            return;
+        }
+        const data = await r.json();
+        const artifactName = data.artifact_name || _selectedArtifact.name;
+        const wasCompressed = data.was_compressed || false;
+        lastHost = artifactName;
+
+        // Actualizar header con el nombre del artefacto
+        const hdrHost = document.getElementById('hdrHost');
+        const compressedNote = wasCompressed ? ` (extraído de ${data.container_name})` : '';
+        if (hdrHost) hdrHost.innerText = `☕ ${artifactName}${compressedNote} — Análisis de Artefacto Java`;
+
+        const sh = artifactName.replace(/[^a-z0-9]/gi, '-').toLowerCase();
+
+        // Mostrar preview del inventario extraído
+        const rawEl = document.getElementById('raw');
+        if (rawEl && data.inventory_preview) rawEl.value = data.inventory_preview + '\n...[artefacto completo en análisis]';
+
+        // Poblar hallazgos locales desde bytecode inventory
+        if (data.inventory_preview) {
+            const localData = discoveryEngine.analyzeData(data.inventory_preview, 'prod');
+            _renderLocalUI(localData);
+            _renderArtifactFindings(data.inventory_preview);
+        }
+
+        if (data.status === 'completed' && data.ai_content) {
+            lastScanId = data.scan_id || null;
+            _activateScanActions(lastScanId, sh);
+            updateAiFields(data.ai_content, sh);
+            sw(0);
+        } else if (data.job_id) {
+            const sizeInfo = wasCompressed
+                ? `${data.artifact_size_kb} KB (comprimido: ${data.container_size_kb} KB)`
+                : `${data.artifact_size_kb} KB`;
+            setAiStatus('running', `⟳ Analizando ${artifactName} — ${sizeInfo}...`);
+            pollJobStatus(data.job_id, sh, apiUrl);
+            sw(0);
+        }
+    } catch(e) {
+        setAiStatus('error', `✗ ${e.message}`);
+    } finally {
+        btn.disabled = false;
+        btn.innerText = '☕ Analizar Artefacto';
+    }
 };
 
 // ─── SSH Collect Steps ────────────────────────────────────────────────────────
@@ -996,11 +1184,11 @@ async function pollCollectStatus(task_id, host, apiUrl) {
             if (s.status === 'completed') {
                 if (prog) prog.style.display = 'none';
                 st.style.color = 'var(--green)';
-                st.innerText = `✓ ${s.lines_collected || 0} líneas recolectadas. Analizando...`;
+                st.innerText = `✓ ${s.lines_collected || 0} líneas recolectadas.`;
                 document.getElementById('raw').value = s.output || '';
                 btn.disabled = false;
                 btn.innerText = '🔍 Conectar y Analizar';
-                run();
+                _showAppsModal(s.output || '');
             } else if (s.status === 'failed') {
                 if (prog) prog.style.display = 'none';
                 st.style.color = 'var(--red)';
@@ -1123,10 +1311,10 @@ window.connectAndCollect = async function() {
                     document.getElementById('raw').value = cached.output;
                     if (prog) prog.style.display = 'none';
                     st.style.color = 'var(--green)';
-                    st.innerText = `Inventario cargado (${age} min) — analizando...`;
+                    st.innerText = `Inventario cargado (${age} min).`;
                     btn.disabled = false;
                     btn.innerText = '🔍 Conectar y Analizar';
-                    await window.run();
+                    _showAppsModal(cached.output);
                     return;
                 }
                 // Si eligió 'new_scan': continuar hacia abajo con scan completo
@@ -1192,13 +1380,155 @@ window.run = async function() {
     }
 };
 
+// ─── Java Artifact Code Findings — parser del texto de inventario de bytecode ──
+function _renderArtifactFindings(inventoryText) {
+    const flist = document.getElementById('flist');
+    if (!flist || !inventoryText) return;
+
+    const cveCards   = [];  // CVE findings — van primero
+    const classCards = [];  // Clases con transformación requerida
+
+    let criticalCount = 0, highCount = 0;
+
+    // ── 1. CVEs detectados en dependencias ────────────────────────────────────
+    const cveMatch = inventoryText.match(/=== CVEs DETECTADOS EN DEPENDENCIAS[^=]*===\n([\s\S]*?)(?:===|$)/i);
+    if (cveMatch) {
+        const cveLines = cveMatch[1].split('\n').filter(l => l.trim().startsWith('['));
+        for (const line of cveLines) {
+            const m = line.match(/\[(CRITICO|ALTO|MEDIO|BAJO)\]\s+(.+?)\s+[→>]\s+(CVE-[\d-]+):\s*(.*)/i);
+            if (!m) continue;
+            const [, sev, jar, cve, desc] = m;
+            if (sev === 'CRITICO') criticalCount++;
+            else if (sev === 'ALTO') highCount++;
+            const bc  = sev === 'CRITICO' ? 'bc' : sev === 'ALTO' ? 'bh' : 'bm';
+            const cls = sev === 'CRITICO' ? 'fc' : sev === 'ALTO' ? 'fh' : 'fm';
+            cveCards.push(`
+            <div class="fi ${cls}">
+                <div class="fhd">
+                    <div style="flex:1;min-width:0">
+                        <div class="ftit">${jar}</div>
+                        <div class="fev">Dependencia JAR — vulnerabilidad conocida</div>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:.3rem;flex-wrap:wrap;justify-content:flex-end">
+                        <span class="fbdg ${bc}">${sev}</span>
+                        <a href="https://nvd.nist.gov/vuln/detail/${cve}" target="_blank" rel="noopener" style="text-decoration:none">
+                            <span class="fbdg bc" style="cursor:pointer;letter-spacing:.02em">${cve}</span></a>
+                    </div>
+                </div>
+                <div class="fbody"><b>Riesgo:</b> ${desc}</div>
+                <div class="fimp">Actualizar el JAR a la versión parcheada o reemplazar la dependencia</div>
+            </div>`);
+        }
+    }
+
+    // ── 2. Clases con transformación requerida (bytecode) ─────────────────────
+    const classBlockMatch = inventoryText.match(/=== CLASES CON TRANSFORMACI[ÓO]N REQUERIDA[\s\S]*?===\n([\s\S]*?)(?:===|$)/i);
+    if (classBlockMatch) {
+        const block = classBlockMatch[1];
+        const classEntries = block.split(/\n  \[/).filter(Boolean);
+        for (const entry of classEntries) {
+            const lines = entry.split('\n');
+            const header = lines[0];
+            const rolesEnd = header.indexOf(']');
+            if (rolesEnd < 0) continue;
+            const roles     = header.slice(0, rolesEnd).replace(/^\[/, '');
+            const className = header.slice(rolesEnd + 1).trim();
+            if (!className) continue;
+
+            let migration = '';
+            const smells  = [];
+            const sqls    = [];
+            for (let i = 1; i < lines.length; i++) {
+                const l = lines[i].trim();
+                if (/^MIGRACIÓN:|^MIGRACION:/i.test(l)) {
+                    migration = l.replace(/^MIGRACIÓN:|^MIGRACION:/i, '').trim();
+                } else if (/^[⚠?]/.test(l)) {
+                    smells.push(l.replace(/^[⚠?]\s*/, ''));
+                } else if (/^SQL:/i.test(l)) {
+                    sqls.push(l.slice(4).trim());
+                }
+            }
+
+            const hasHardChanges = /EJB|MDB/i.test(roles) || smells.some(s => /Runtime\.exec|MD5|DES/i.test(s));
+            const hasModerate    = /Servlet/i.test(roles) || smells.some(s => /JNDI|SQL|Session/i.test(s));
+            const portable = hasHardChanges
+                ? { label: 'REQUIERE REFACTOR',   color: 'var(--red)' }
+                : hasModerate
+                ? { label: 'CAMBIOS NECESARIOS',  color: 'var(--yellow)' }
+                : { label: 'PORTABLE',             color: 'var(--green)' };
+
+            if (hasHardChanges) criticalCount++;
+            else if (hasModerate) highCount++;
+
+            const shortClass = className.split('.').pop();
+            const pkg = className.includes('.') ? className.slice(0, className.lastIndexOf('.')) : '';
+
+            classCards.push(`
+            <div class="fi ${hasHardChanges ? 'fc' : hasModerate ? 'fh' : 'fm'}" style="margin-bottom:.4rem">
+                <div class="fhd">
+                    <div style="flex:1;min-width:0">
+                        <div class="ftit" title="${className}">${shortClass}
+                            ${pkg ? `<span style="font-size:.62rem;color:var(--t2);font-weight:400;margin-left:.3rem">${pkg}</span>` : ''}
+                        </div>
+                        <div class="fev">[${roles}]</div>
+                    </div>
+                    <span style="font-size:.6rem;font-weight:700;padding:.15rem .5rem;border-radius:8px;background:rgba(0,0,0,.4);color:${portable.color};border:1px solid ${portable.color};white-space:nowrap">${portable.label}</span>
+                </div>
+                ${migration ? `<div style="font-size:.74rem;color:var(--green);margin:.25rem 0">→ ${migration}</div>` : ''}
+                ${smells.length ? `<div style="margin-top:.25rem;display:flex;flex-direction:column;gap:.12rem">
+                    ${smells.map(s => {
+                        const col = /security|md5|des|runtime\.exec/i.test(s) ? 'var(--red)'
+                                  : /jndi|sql|session/i.test(s) ? 'var(--yellow)'
+                                  : 'var(--t2)';
+                        const [cat, ...rest] = s.split(':');
+                        return `<div style="font-size:.71rem;color:${col}">
+                            <b style="text-transform:uppercase;font-size:.6rem">${cat.trim()}</b>${rest.length ? ': ' + rest.join(':').trim() : ''}
+                        </div>`;
+                    }).join('')}
+                </div>` : ''}
+                ${sqls.length ? `<div style="margin-top:.35rem">
+                    ${sqls.map(q => `<pre style="font-size:.62rem;background:rgba(255,200,0,.06);border:1px solid rgba(255,200,0,.25);padding:.3rem .5rem;border-radius:4px;color:#f0d060;margin-top:.15rem;overflow-x:auto;white-space:pre-wrap;line-height:1.4">${q}</pre>`).join('')}
+                </div>` : ''}
+            </div>`);
+        }
+    }
+
+    // ── 3. Actualizar contadores en #summ ─────────────────────────────────────
+    const summEl = document.getElementById('summ');
+    if (summEl && (criticalCount || highCount)) {
+        summEl.innerHTML = `
+            <div style="display:flex;gap:2rem">
+                <div style="text-align:center">
+                    <div style="font-size:1.8rem;font-weight:700;color:var(--red)">${criticalCount}</div>
+                    <div style="font-size:.62rem;color:var(--t2)">CRITICOS</div>
+                </div>
+                <div style="text-align:center">
+                    <div style="font-size:1.8rem;font-weight:700;color:var(--yellow)">${highCount}</div>
+                    <div style="font-size:.62rem;color:var(--t2)">ALTOS</div>
+                </div>
+            </div>`;
+    }
+
+    // ── 4. Renderizar: CVEs primero, luego clases ─────────────────────────────
+    const allCards = [...cveCards, ...classCards];
+    if (allCards.length) {
+        flist.innerHTML = allCards.join('');
+    } else {
+        flist.innerHTML = '<p style="font-size:.75rem;color:var(--t2);padding:.5rem">No se detectaron hallazgos de código en el inventario.</p>';
+    }
+}
+
 // ─── Rendering local (reutilizado por analyze() y loadHistory()) ───────────────
 function _renderLocalUI(data) {
     lastDetectedTechs = data.detectedTechs || [];
     lastFindings      = data.findings      || [];
     lastHost          = data.host          || '';
 
-    document.getElementById('hdrHost').innerText = '📍 ' + data.host + ' — Analisis de Modernización';
+    // Preserve artifact header if already set
+    const hdrEl = document.getElementById('hdrHost');
+    if (hdrEl && !hdrEl.innerText.startsWith('☕')) {
+        hdrEl.innerText = '📍 ' + data.host + ' — Analisis de Modernización';
+    }
     document.getElementById('patbdg').innerHTML = '<span style="background:linear-gradient(135deg,#9d50bb,#6e48aa);padding:.35rem .9rem;border-radius:8px;font-weight:700;font-size:.73rem">' + data.pattern + '</span>';
 
     document.getElementById('summ').innerHTML = `
@@ -1287,10 +1617,19 @@ function _renderLocalUI(data) {
     document.getElementById('sread').innerText = maxRisk >= 8 ? 'Baja' : (data.criticalCount >= 1 ? 'Media' : 'Lista');
     document.getElementById('ssum').innerHTML  = `<p><b>Host:</b> ${data.host}</p><p><b>OS:</b> ${data.osStr}</p>`;
 
-    document.getElementById('fop').innerText = '$' + data.costs.totalOpEx;
-    document.getElementById('fmi').innerText = '$' + data.costs.migrationCost;
+    document.getElementById('fop').innerText = '$' + data.costs.totalOpEx.toLocaleString();
+    document.getElementById('fmi').innerText = '$' + data.costs.migrationCost.toLocaleString();
     document.getElementById('fpa').innerText = typeof data.costs.paybackMonths === 'number' ? data.costs.paybackMonths + ' meses' : 'N/A';
-    document.getElementById('fin').innerText = '$' + data.costs.annualCostInaction;
+    document.getElementById('fin').innerText = '$' + data.costs.annualCostInaction.toLocaleString();
+    
+    // TCO Detalles
+    if(document.getElementById('tcper')) document.getElementById('tcper').innerText = '$' + (data.costs.perpetualAmort || 0).toLocaleString();
+    if(document.getElementById('tcann')) document.getElementById('tcann').innerText = '$' + (data.costs.annualLic || 0).toLocaleString();
+    if(document.getElementById('tclab')) document.getElementById('tclab').innerText = '$' + (data.costs.laborCosts || 0).toLocaleString();
+    if(document.getElementById('tcfive')) document.getElementById('tcfive').innerText = '$' + (data.costs.fiveYearTco || 0) + 'K';
+    if(document.getElementById('tcfivem')) document.getElementById('tcfivem').innerText = '$' + (data.costs.fiveYearModern || 0) + 'K';
+    if(document.getElementById('tcsave')) document.getElementById('tcsave').innerText = '$' + (data.costs.savings || 0) + 'K';
+    if(document.getElementById('tcroi')) document.getElementById('tcroi').innerText = (data.costs.roiPct || 0).toLocaleString() + '%';
 }
 
 window.analyze = async function() {
@@ -1300,7 +1639,8 @@ window.analyze = async function() {
         return;
     }
 
-    const data = discoveryEngine.analyzeData(raw);
+    lastEnvType = (document.getElementById('env-select') || {}).value || 'prod';
+    const data = discoveryEngine.analyzeData(raw, lastEnvType);
     _renderLocalUI(data);
 
     const sh = data.host.replace(/[^a-z0-9]/gi, '-').toLowerCase();
@@ -1341,6 +1681,300 @@ window.analyze = async function() {
         _activateScanActions(lastScanId, sh);
     }
 };
+
+// ─── CloudNative Agent Renderer ───────────────────────────────────────────────
+let _k8sManifests = {};  // guarda los 3 manifests para el tab switcher
+
+window._copyCode = function(preId, filename) {
+    const el = document.getElementById(preId);
+    if (!el) return;
+    navigator.clipboard.writeText(el.innerText).then(() => {
+        const btn = event.target;
+        const orig = btn.innerText;
+        btn.innerText = '✓ Copiado';
+        setTimeout(() => btn.innerText = orig, 1500);
+    }).catch(() => {
+        // fallback
+        const ta = document.createElement('textarea');
+        ta.value = el.innerText;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+    });
+};
+
+window._downloadFile = function(preId, filename) {
+    const el = document.getElementById(preId);
+    if (!el) return;
+    const blob = new Blob([el.innerText], { type: 'text/plain' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+};
+
+window.showK8sTab = function(tab) {
+    const pre = document.getElementById('cn-k8s-pre');
+    if (!pre) return;
+    pre.innerText = _k8sManifests[tab] || '— no disponible —';
+    ['deployment','service','hpa'].forEach(t => {
+        const btn = document.getElementById('k8s-tab-' + t);
+        if (btn) btn.style.opacity = t === tab ? '1' : '0.45';
+    });
+};
+
+function _renderCloudNative(cn) {
+    const panel = document.getElementById('cloudnative-panel');
+    if (!panel || !cn) return;
+
+    let hasContent = false;
+
+    // Bloqueadores
+    const blockBox  = document.getElementById('cn-blockers-box');
+    const blockList = document.getElementById('cn-blockers-list');
+    if (cn.blocking_issues?.length && blockBox && blockList) {
+        const sevColor = s => s === 'CRITICO' ? 'var(--red)' : s === 'ALTO' ? '#ff9f43' : 'var(--yellow)';
+        blockList.innerHTML = cn.blocking_issues.map(b => `
+            <div style="padding:.35rem 0;border-bottom:1px solid rgba(255,255,255,.05)">
+                <div style="display:flex;gap:.5rem;align-items:flex-start">
+                    <span style="font-size:.6rem;font-weight:700;color:${sevColor(b.severity)};white-space:nowrap;padding-top:.1rem">${b.severity}</span>
+                    <div>
+                        <div style="font-size:.75rem;color:#ddd">${b.issue}</div>
+                        ${b.resolution ? `<div style="font-size:.7rem;color:var(--green);margin-top:.1rem">→ ${b.resolution}</div>` : ''}
+                    </div>
+                </div>
+            </div>`).join('');
+        blockBox.style.display = 'block';
+        hasContent = true;
+    }
+
+    // 12-Factor violations
+    const ffBox  = document.getElementById('cn-12factor-box');
+    const ffList = document.getElementById('cn-12factor-list');
+    if (cn.twelve_factor_violations?.length && ffBox && ffList) {
+        ffList.innerHTML = cn.twelve_factor_violations.map(v => `
+            <div style="padding:.3rem 0;border-bottom:1px solid rgba(255,255,255,.05)">
+                <div style="font-size:.68rem;font-weight:700;color:var(--yellow)">${v.factor || ''}</div>
+                <div style="font-size:.72rem;color:var(--t2)">${v.violation || ''}</div>
+                ${v.fix ? `<div style="font-size:.7rem;color:var(--green);margin-top:.1rem">→ ${v.fix}</div>` : ''}
+            </div>`).join('');
+        ffBox.style.display = 'block';
+        hasContent = true;
+    }
+
+    // Dockerfile
+    const dfBox = document.getElementById('cn-dockerfile-box');
+    const dfPre = document.getElementById('cn-dockerfile-pre');
+    if (cn.dockerfile && cn.dockerfile.length > 10 && dfBox && dfPre) {
+        dfPre.innerText = cn.dockerfile.replace(/\\n/g, '\n');
+        dfBox.style.display = 'block';
+        hasContent = true;
+    }
+
+    // docker-compose
+    const dcBox = document.getElementById('cn-compose-box');
+    const dcPre = document.getElementById('cn-compose-pre');
+    if (cn.docker_compose && cn.docker_compose.length > 10 && dcBox && dcPre) {
+        dcPre.innerText = cn.docker_compose.replace(/\\n/g, '\n');
+        dcBox.style.display = 'block';
+        hasContent = true;
+    }
+
+    // K8s manifests
+    const k8sBox = document.getElementById('cn-k8s-box');
+    const k8sPre = document.getElementById('cn-k8s-pre');
+    if ((cn.k8s_deployment || cn.k8s_service || cn.k8s_hpa) && k8sBox && k8sPre) {
+        _k8sManifests = {
+            deployment: (cn.k8s_deployment || '').replace(/\\n/g, '\n'),
+            service:    (cn.k8s_service    || '').replace(/\\n/g, '\n'),
+            hpa:        (cn.k8s_hpa        || '').replace(/\\n/g, '\n'),
+        };
+        k8sPre.innerText = _k8sManifests.deployment || _k8sManifests.service || _k8sManifests.hpa;
+        k8sBox.style.display = 'block';
+        hasContent = true;
+    }
+
+    // Código refactorizado
+    const rfBox  = document.getElementById('cn-refactor-box');
+    const rfList = document.getElementById('cn-refactor-list');
+    if (cn.refactored_snippets?.length && rfBox && rfList) {
+        rfList.innerHTML = cn.refactored_snippets.map(s => `
+            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:10px;padding:.8rem 1rem">
+                <div style="font-weight:700;font-size:.82rem;color:var(--blue);margin-bottom:.2rem">${s.class || ''}</div>
+                ${s.issue ? `<div style="font-size:.74rem;color:#ddd;margin-bottom:.4rem">${s.issue}</div>` : ''}
+                ${s.before ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:.4rem">
+                    <div>
+                        <div style="font-size:.6rem;color:var(--red);margin-bottom:.15rem;font-weight:700">ANTES</div>
+                        <pre style="font-size:.64rem;background:rgba(255,65,108,.05);border:1px solid rgba(255,65,108,.2);padding:.4rem;border-radius:4px;overflow-x:auto;max-height:160px;line-height:1.5;white-space:pre-wrap">${s.before}</pre>
+                    </div>
+                    <div>
+                        <div style="font-size:.6rem;color:var(--green);margin-bottom:.15rem;font-weight:700">DESPUÉS (Cloud-Native)</div>
+                        <pre style="font-size:.64rem;background:rgba(0,255,150,.05);border:1px solid rgba(0,255,150,.2);padding:.4rem;border-radius:4px;overflow-x:auto;max-height:160px;line-height:1.5;white-space:pre-wrap">${s.after || ''}</pre>
+                    </div>
+                </div>` : ''}
+                ${s.why ? `<div style="font-size:.7rem;color:var(--t2);margin-top:.35rem;border-top:1px solid var(--bdr);padding-top:.3rem">${s.why}</div>` : ''}
+            </div>`).join('');
+        rfBox.style.display = 'block';
+        hasContent = true;
+    }
+
+    // Comandos de despliegue
+    const cmdBox  = document.getElementById('cn-commands-box');
+    const cmdList = document.getElementById('cn-commands-list');
+    if (cn.deployment_commands?.length && cmdBox && cmdList) {
+        cmdList.innerHTML = cn.deployment_commands.map((cmd, i) => `
+            <div style="display:flex;align-items:center;gap:.5rem;padding:.3rem 0;border-bottom:1px solid rgba(255,255,255,.05)">
+                <span style="font-size:.6rem;color:var(--t2);min-width:1.2rem">${i+1}.</span>
+                <code style="font-size:.68rem;color:var(--green);flex:1;overflow-x:auto;white-space:pre">${cmd}</code>
+                <button class="bsm" style="padding:.1rem .4rem;font-size:.6rem;margin:0" onclick="navigator.clipboard.writeText('${cmd.replace(/'/g,"\\'")}')">⎘</button>
+            </div>`).join('');
+        cmdBox.style.display = 'block';
+        hasContent = true;
+    }
+
+    // Healthchecks
+    const hcBox     = document.getElementById('cn-health-box');
+    const hcContent = document.getElementById('cn-health-content');
+    if (cn.healthcheck_config && Object.keys(cn.healthcheck_config).length && hcBox && hcContent) {
+        const hc = cn.healthcheck_config;
+        hcContent.innerHTML = [
+            hc.liveness_probe  ? `<div style="margin-bottom:.5rem"><div style="font-size:.6rem;font-weight:700;color:var(--green);margin-bottom:.2rem">LIVENESS</div><div style="font-size:.71rem;color:#ddd">${hc.liveness_probe}</div></div>` : '',
+            hc.readiness_probe ? `<div style="margin-bottom:.5rem"><div style="font-size:.6rem;font-weight:700;color:var(--blue);margin-bottom:.2rem">READINESS</div><div style="font-size:.71rem;color:#ddd">${hc.readiness_probe}</div></div>` : '',
+            hc.startup_probe   ? `<div><div style="font-size:.6rem;font-weight:700;color:var(--yellow);margin-bottom:.2rem">STARTUP</div><div style="font-size:.71rem;color:#ddd">${hc.startup_probe}</div></div>` : '',
+        ].filter(Boolean).join('');
+        hcBox.style.display = 'block';
+        hasContent = true;
+    }
+
+    // Terraform Managed Services
+    const tfBox = document.getElementById('cn-terraform-box');
+    const tfPre = document.getElementById('cn-terraform-pre');
+    if (cn.terraform_managed_services && cn.terraform_managed_services.length > 10 && tfBox && tfPre) {
+        tfPre.innerText = cn.terraform_managed_services.replace(/\\n/g, '\n');
+        tfBox.style.display = 'block';
+        hasContent = true;
+    }
+
+    // TO-BE Architecture Diagram (Mermaid)
+    const tobeBox = document.getElementById('cn-tobe-box');
+    const tobeDiag = document.getElementById('cn-tobe-diagram');
+    if (cn.to_be_diagram && tobeBox && tobeDiag) {
+        const raw = cn.to_be_diagram.replace(/\\n/g, '\n');
+        tobeDiag.removeAttribute('data-processed');
+        tobeDiag.innerText = raw;
+        tobeBox.style.display = 'block';
+        hasContent = true;
+        if (window.mermaid) {
+            try { window.mermaid.init(undefined, tobeDiag); } catch(e) { console.warn('[Mermaid TO-BE]', e); }
+        }
+    }
+
+    // SRE Runbooks
+    const rbBox  = document.getElementById('cn-runbook-box');
+    const rbList = document.getElementById('cn-runbook-list');
+    if (cn.sre_runbook?.length && rbBox && rbList) {
+        rbList.innerHTML = cn.sre_runbook.map(r => `
+            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:8px;padding:.7rem 1rem">
+                <div style="font-weight:700;font-size:.8rem;color:var(--blue);margin-bottom:.15rem">${r.title || ''}</div>
+                ${r.trigger ? `<div style="font-size:.7rem;color:var(--yellow);margin-bottom:.4rem">⚡ ${r.trigger}</div>` : ''}
+                ${r.steps?.length ? `<ol style="margin:0;padding-left:1.1rem">${r.steps.map(s => `<li style="font-size:.7rem;color:#ddd;padding:.1rem 0">${s}</li>`).join('')}</ol>` : ''}
+            </div>`).join('');
+        rbBox.style.display = 'block';
+        hasContent = true;
+    }
+
+    // LocalStack compose → populate Lab tab
+    const labEmpty   = document.getElementById('lab-empty');
+    const labContent = document.getElementById('lab-content');
+    const labPre     = document.getElementById('lab-compose-pre');
+    if (cn.localstack_compose && labPre) {
+        labPre.innerText = cn.localstack_compose.replace(/\\n/g, '\n');
+        if (labEmpty)   labEmpty.style.display   = 'none';
+        if (labContent) labContent.style.display = 'block';
+    }
+
+    if (hasContent) panel.style.display = 'block';
+}
+
+// ─── Business/FinOps Agent Renderer ──────────────────────────────────────────
+function _renderBusiness(biz) {
+    const box = document.getElementById('cn-business-box');
+    if (!box || !biz || !biz.risk_score) return;
+
+    const fmt = n => n != null ? '$' + Number(n).toLocaleString() : '—';
+
+    // C-Suite summary
+    const csEl = document.getElementById('cn-csuite');
+    if (csEl && biz.c_suite_summary) {
+        csEl.innerHTML = `<b style="color:var(--blue)">Para el C-Suite:</b> ${biz.c_suite_summary}`;
+    }
+
+    // TCO Legacy
+    const legEl = document.getElementById('cn-tco-legacy');
+    if (legEl && biz.tco_legacy) {
+        const l = biz.tco_legacy;
+        legEl.innerHTML = [
+            ['Licenciamiento', l.annual_licensing],
+            ['Labor/Mantenimiento', l.annual_labor_maintenance],
+            ['Riesgo Incidentes Seg.', l.annual_security_incidents_risk],
+            ['Downtime', l.annual_downtime_cost],
+        ].map(([k, v]) => `<div style="display:flex;justify-content:space-between;padding:.2rem 0;font-size:.73rem;border-bottom:1px solid rgba(255,255,255,.04)">
+            <span style="color:var(--t2)">${k}</span><span style="color:var(--red)">${fmt(v)}</span>
+        </div>`).join('') +
+        `<div style="display:flex;justify-content:space-between;padding:.3rem 0;font-size:.8rem;font-weight:700">
+            <span>Total Anual</span><span style="color:var(--red)">${fmt(l.total_annual)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:.2rem 0;font-size:.72rem">
+            <span style="color:var(--t2)">5 años</span><span style="color:var(--red)">${fmt(l.five_year_total)}</span>
+        </div>`;
+    }
+
+    // TCO AWS
+    const awsEl = document.getElementById('cn-tco-aws');
+    if (awsEl && biz.tco_aws) {
+        const a = biz.tco_aws;
+        awsEl.innerHTML = [
+            ['ECS Fargate/mes', a.ecs_fargate_monthly],
+            ['RDS Aurora Serverless/mes', a.rds_aurora_serverless_monthly],
+            ['Secrets Manager/mes', a.secrets_manager_monthly],
+            ['CloudWatch/mes', a.cloudwatch_monthly],
+        ].map(([k, v]) => `<div style="display:flex;justify-content:space-between;padding:.2rem 0;font-size:.73rem;border-bottom:1px solid rgba(255,255,255,.04)">
+            <span style="color:var(--t2)">${k}</span><span style="color:var(--green)">${fmt(v)}</span>
+        </div>`).join('') +
+        `<div style="display:flex;justify-content:space-between;padding:.3rem 0;font-size:.8rem;font-weight:700">
+            <span>Total Anual</span><span style="color:var(--green)">${fmt(a.total_annual)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:.2rem 0;font-size:.72rem">
+            <span style="color:var(--t2)">Migración (único)</span><span style="color:var(--yellow)">${fmt(a.migration_one_time_cost)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:.2rem 0;font-size:.72rem">
+            <span style="color:var(--t2)">Total 5 años</span><span style="color:var(--green)">${fmt(a.five_year_total)}</span>
+        </div>`;
+    }
+
+    // ROI
+    const roiEl = document.getElementById('cn-roi-content');
+    if (roiEl && biz.roi) {
+        const r = biz.roi;
+        roiEl.innerHTML = [
+            { label: 'Ahorro Anual',    val: fmt(r.annual_saving),  color: 'var(--green)' },
+            { label: 'Ahorro 5 años',   val: fmt(r.five_year_saving), color: 'var(--green)' },
+            { label: 'Payback',         val: r.payback_months ? r.payback_months + ' meses' : '—', color: 'var(--blue)' },
+            { label: 'ROI',             val: r.roi_pct ? r.roi_pct + '%' : '—', color: 'var(--yellow)' },
+        ].map(({ label, val, color }) => `
+            <div style="text-align:center">
+                <div style="font-size:1.1rem;font-weight:700;color:${color}">${val}</div>
+                <div style="font-size:.6rem;color:var(--t2)">${label}</div>
+            </div>`).join('');
+    }
+
+    box.style.display = 'block';
+}
 
 window.updateAiFields = function(aiData, sh) {
     lastAiData = aiData;
@@ -1466,12 +2100,126 @@ window.updateAiFields = function(aiData, sh) {
                 <div style="font-size:.78rem;color:var(--green);margin-bottom:.3rem"><b>Acción:</b> ${r.action || ''}</div>
                 ${r.before ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-top:.4rem">
                     <div><div style="font-size:.6rem;color:var(--red);margin-bottom:.2rem">ANTES</div><pre style="font-size:.65rem;max-height:80px;overflow:auto">${r.before}</pre></div>
-                    <div><div style="font-size:.6rem;color:var(--green);margin-bottom:.2rem">DESPUÉS</div><pre style="font-size:.65rem;max-height:80px;overflow:auto">${r.after || ''}</pre></div>
+                    <div><div style="font-size:.6rem;color:var(--green);margin-bottom:.2rem">DESPUÉS</div>${r.after ? `<pre style="font-size:.65rem;max-height:80px;overflow:auto">${r.after}</pre>` : '<div style="font-size:.65rem;color:var(--t2);font-style:italic;padding:.5rem;background:rgba(0,0,0,.2);border-radius:4px">Acción: elimina código.</div>'}</div>
                 </div>` : ''}
                 ${r.benefit ? `<div style="font-size:.72rem;color:var(--t2);margin-top:.3rem;border-top:1px solid var(--bdr);padding-top:.3rem">${r.benefit}</div>` : ''}
             </div>`).join('');
         remedBox.style.display = 'block';
     }
+
+    // ── Java Findings (CVEs)
+    const jfBox  = document.getElementById('java-findings-box');
+    const jfList = document.getElementById('java-findings-list');
+    if (aiData?.java_findings?.length && jfBox && jfList) {
+        const sevColor = s => s === 'CRITICO' ? 'var(--red)' : s === 'ALTO' ? '#ff9f43' : s === 'MEDIO' ? 'var(--yellow)' : 'var(--t2)';
+        jfList.innerHTML = aiData.java_findings.map(f => `
+            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:8px;padding:.6rem .9rem;display:flex;flex-wrap:wrap;gap:.5rem;align-items:flex-start">
+                <span style="font-size:.65rem;font-weight:700;padding:.15rem .5rem;border-radius:8px;background:rgba(0,0,0,.4);color:${sevColor(f.severity)};border:1px solid ${sevColor(f.severity)};white-space:nowrap">${f.severity || ''}</span>
+                <div style="flex:1;min-width:0">
+                    <div style="font-weight:700;font-size:.8rem;color:var(--blue)">${f.component || ''}${f.version ? ` <span style="font-size:.68rem;color:var(--t2);font-weight:400">v${f.version}</span>` : ''}</div>
+                    <div style="font-size:.75rem;color:#ddd;margin-top:.2rem">${f.issue || ''}</div>
+                    ${f.recommendation ? `<div style="font-size:.72rem;color:var(--green);margin-top:.2rem">→ ${f.recommendation}</div>` : ''}
+                </div>
+                ${f.cve && f.cve !== 'N/A' ? `<a href="https://nvd.nist.gov/vuln/detail/${f.cve}" target="_blank" rel="noopener" style="font-size:.62rem;color:var(--red);text-decoration:none;background:rgba(255,65,108,.15);padding:.15rem .45rem;border-radius:4px;white-space:nowrap;align-self:flex-start">${f.cve}</a>` : ''}
+            </div>`).join('');
+        jfBox.style.display = 'block';
+    }
+
+    // ── Code Transformation (JEE → Spring Boot)
+    const ctBox  = document.getElementById('code-transform-box');
+    const ctList = document.getElementById('code-transform-list');
+    if (aiData?.code_transformation?.length && ctBox && ctList) {
+        ctList.innerHTML = aiData.code_transformation.map(t => `
+            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:10px;padding:.8rem 1rem">
+                <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.4rem">
+                    <span style="font-weight:700;font-size:.82rem;color:var(--blue)">${t.class_name || ''}</span>
+                    ${t.effort_days ? `<span style="font-size:.62rem;color:var(--t2);margin-left:auto">${t.effort_days}d</span>` : ''}
+                </div>
+                <div style="font-size:.72rem;color:var(--t2);margin-bottom:.3rem">
+                    <span style="color:var(--red)">${t.current_pattern || ''}</span> → <span style="color:var(--green)">${t.target_pattern || ''}</span>
+                </div>
+                ${t.why ? `<div style="font-size:.75rem;color:#ddd;margin-bottom:.4rem">${t.why}</div>` : ''}
+                ${t.before ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-top:.4rem">
+                    <div><div style="font-size:.6rem;color:var(--red);margin-bottom:.2rem">ANTES (JEE)</div><pre style="font-size:.64rem;max-height:120px;overflow:auto;background:rgba(255,65,108,.05);border:1px solid rgba(255,65,108,.2);padding:.4rem;border-radius:4px">${t.before}</pre></div>
+                    <div><div style="font-size:.6rem;color:var(--green);margin-bottom:.2rem">DESPUES (Spring Boot)</div><pre style="font-size:.64rem;max-height:120px;overflow:auto;background:rgba(0,255,150,.05);border:1px solid rgba(0,255,150,.2);padding:.4rem;border-radius:4px">${t.after || ''}</pre></div>
+                </div>` : ''}
+                ${t.dependencies_to_add?.length ? `<div style="font-size:.68rem;color:var(--green);margin-top:.3rem">+ ${t.dependencies_to_add.join(', ')}</div>` : ''}
+                ${t.dependencies_to_remove?.length ? `<div style="font-size:.68rem;color:var(--red)">- ${t.dependencies_to_remove.join(', ')}</div>` : ''}
+            </div>`).join('');
+        ctBox.style.display = 'block';
+    }
+
+    // ── SQL Analysis
+    const sqlBox  = document.getElementById('sql-analysis-box');
+    const sqlList = document.getElementById('sql-analysis-list');
+    if (aiData?.sql_analysis?.length && sqlBox && sqlList) {
+        sqlList.innerHTML = aiData.sql_analysis.map(s => `
+            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:8px;padding:.6rem .9rem">
+                ${s.class ? `<div style="font-size:.68rem;color:var(--blue);margin-bottom:.3rem;font-weight:600">${s.class}</div>` : ''}
+                <pre style="font-size:.66rem;background:rgba(255,200,0,.05);border:1px solid rgba(255,200,0,.2);padding:.4rem;border-radius:4px;margin-bottom:.3rem;overflow:auto;max-height:60px">${s.query || ''}</pre>
+                ${s.jpa_equivalent ? `<div style="font-size:.7rem;color:var(--green)">JPA: <code style="background:rgba(0,255,150,.1);padding:.1rem .3rem;border-radius:3px">${s.jpa_equivalent}</code></div>` : ''}
+                ${s.recommendation ? `<div style="font-size:.7rem;color:var(--t2);margin-top:.2rem">${s.recommendation}</div>` : ''}
+            </div>`).join('');
+        sqlBox.style.display = 'block';
+    }
+
+    // ── Externalization
+    const extBox  = document.getElementById('externalization-box');
+    const extList = document.getElementById('externalization-list');
+    if (aiData?.externalization?.length && extBox && extList) {
+        extList.innerHTML = aiData.externalization.map(e => `
+            <div style="background:rgba(0,0,0,.25);border:1px solid var(--bdr);border-radius:8px;padding:.55rem .85rem;display:flex;flex-wrap:wrap;gap:.5rem;align-items:flex-start">
+                <span style="font-size:.62rem;font-weight:700;padding:.12rem .45rem;border-radius:6px;background:rgba(0,163,255,.15);color:var(--blue);white-space:nowrap">${e.type || ''}</span>
+                <div style="flex:1;min-width:0">
+                    <div style="font-size:.74rem;color:#ddd">${e.found_in || ''} ${e.current_value ? `<code style="font-size:.65rem;color:var(--yellow);background:rgba(255,200,0,.1);padding:.1rem .3rem;border-radius:3px">${e.current_value}</code>` : ''}</div>
+                    ${e.target ? `<div style="font-size:.7rem;color:var(--green);margin-top:.15rem">→ ${e.target}</div>` : ''}
+                    ${e.how ? `<div style="font-size:.68rem;color:var(--t2);margin-top:.1rem">${e.how}</div>` : ''}
+                </div>
+            </div>`).join('');
+        extBox.style.display = 'block';
+    }
+
+    // ── Containerization (Dockerfile)
+    const jcBox     = document.getElementById('java-container-box');
+    const jcContent = document.getElementById('java-container-content');
+    if (aiData?.containerization && jcBox && jcContent) {
+        const c = aiData.containerization;
+        
+        // Determinar qué código mostrar por defecto (lift_shift o modernized)
+        const d_lift = c.dockerfile_lift_shift || c.dockerfile || '# Dockerfile Lift & Shift no disponible';
+        const d_mod  = c.dockerfile_modernized || '# Dockerfile Modernizado no disponible';
+        
+        jcContent.innerHTML = `
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-bottom:.6rem">
+                ${c.base_image ? `<div><span style="font-size:.65rem;color:var(--t2)">BASE IMAGE</span><div style="font-size:.78rem;color:var(--blue);font-weight:600">${c.base_image}</div></div>` : ''}
+                ${c.jvm_flags ? `<div><span style="font-size:.65rem;color:var(--t2)">JVM FLAGS</span><div style="font-size:.68rem;color:var(--yellow)">${c.jvm_flags}</div></div>` : ''}
+            </div>
+            
+            ${c.toxic_dependencies && c.toxic_dependencies.length > 0 && c.toxic_dependencies[0] !== "Ninguna" && !c.toxic_dependencies[0].includes("Ninguna detectada") ? `
+            <div style="margin-bottom:.6rem;background:rgba(255,65,108,.1);border:1px solid var(--red);border-radius:6px;padding:.5rem;font-size:.7rem;color:var(--red)">
+                <strong style="display:block;margin-bottom:.2rem">⚠ TOXIC DEPENDENCIES (Bloqueantes de Containerización)</strong>
+                <ul style="margin:0;padding-left:1.2rem">${c.toxic_dependencies.map(td => `<li>${td}</li>`).join('')}</ul>
+            </div>` : ''}
+
+            <div style="margin-bottom:.4rem;display:flex;gap:.5rem;border-bottom:1px solid var(--bdr);padding-bottom:.3rem">
+                <button onclick="document.getElementById('df-lift').style.display='block';document.getElementById('df-mod').style.display='none';this.style.color='var(--blue)';this.nextElementSibling.style.color='var(--t2)'" style="background:none;border:none;color:var(--blue);cursor:pointer;font-size:.7rem;font-weight:bold;padding:0">Lift & Shift</button>
+                <button onclick="document.getElementById('df-mod').style.display='block';document.getElementById('df-lift').style.display='none';this.style.color='var(--blue)';this.previousElementSibling.style.color='var(--t2)'" style="background:none;border:none;color:var(--t2);cursor:pointer;font-size:.7rem;font-weight:bold;padding:0">Modernizado (Spring Boot)</button>
+            </div>
+
+            <pre id="df-lift" style="font-size:.64rem;background:rgba(0,0,0,.4);border:1px solid var(--bdr);padding:.7rem;border-radius:6px;overflow:auto;max-height:220px;margin-bottom:.5rem">${d_lift}</pre>
+            <pre id="df-mod" style="font-size:.64rem;background:rgba(0,0,0,.4);border:1px solid var(--bdr);padding:.7rem;border-radius:6px;overflow:auto;max-height:220px;margin-bottom:.5rem;display:none">${d_mod}</pre>
+
+            ${c.env_vars?.length ? `<div style="font-size:.7rem;color:var(--t2);margin-top:.3rem"><b style="color:#ddd">ENV VARS:</b> ${c.env_vars.join(' · ')}</div>` : ''}
+            ${c.health_check ? `<div style="font-size:.7rem;color:var(--green);margin-top:.3rem"><b>HEALTHCHECK:</b> <code>${c.health_check}</code></div>` : ''}
+        `;
+        jcBox.style.display = 'block';
+    }
+
+    // ── CloudNative Agent — Artefactos de Migración
+    _renderCloudNative(aiData?.cloudnative);
+
+    // ── Business/FinOps Agent — TCO y ROI
+    _renderBusiness(aiData?.business);
 
     // Code blocks — generar localmente si IA no los retornó
     _renderIaC(lastDetectedTechs, lastHost);
@@ -1852,7 +2600,7 @@ window.sendChat = async function() {
 
     // Spinner
     const spinnerId = 'chat-spin-' + Date.now();
-    msgBox.innerHTML += `<div id="${spinnerId}" style="align-self:flex-start;color:var(--t2);font-size:.72rem;padding:.3rem">⟳ Consultando AI...</div>`;
+    msgBox.innerHTML += `<div id="${spinnerId}" style="align-self:flex-start;color:var(--t2);font-size:.72rem;padding:.3rem">⟳ Herny está pensando...</div>`;
     msgBox.scrollTop = msgBox.scrollHeight;
 
     try {
@@ -2101,7 +2849,8 @@ window.loadPricing = async function() {
     if (tbody) tbody.innerHTML = '<tr><td colspan="3" style="color:var(--t2);text-align:center;padding:.5rem">Calculando...</td></tr>';
 
     try {
-        const r = await fetch(`${apiUrl}/pricing/${lastScanId}`, { headers: authHeaders() });
+        const envParams = `?env=${lastEnvType || 'prod'}`;
+        const r = await fetch(`${apiUrl}/pricing/${lastScanId}${envParams}`, { headers: authHeaders() });
         if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
         const d = await r.json();
 
