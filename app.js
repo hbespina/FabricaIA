@@ -2224,34 +2224,104 @@ window.updateAiFields = function(aiData, sh) {
     // ── SRE Pilar — Healthchecks, 12-Factor, Runbooks
     _renderSre(aiData?.cloudnative);
 
-    // ── Business / TCO / ROI (Pilar 5 - FinOps)
-    const biz = aiData?.business;
-    if (biz && biz.risk_score) {
-        document.getElementById('finops-business-box').style.display = 'block';
-        document.getElementById('finops-csuite').innerHTML = `<b>Executive ROI Summary:</b> ${biz.c_suite_summary || ''}`;
-        document.getElementById('finops-tco-legacy').innerText = biz.tco_legacy?.total_annual ? '$' + biz.tco_legacy.total_annual.toLocaleString() : '—';
-        document.getElementById('finops-tco-aws').innerText = biz.tco_aws?.total_annual ? '$' + biz.tco_aws.total_annual.toLocaleString() : '—';
-        
-        const roiCont = document.getElementById('finops-roi-content');
-        if (roiCont && biz.roi) {
-            const r = biz.roi;
-            roiCont.innerHTML = `
-                <div style="text-align:center">
-                    <div style="font-size:1.1rem;font-weight:700;color:var(--green)">${r.roi_pct}%</div>
-                    <div style="font-size:.6rem;color:var(--t2)">ROI</div>
-                </div>
-                <div style="text-align:center">
-                    <div style="font-size:1.1rem;font-weight:700;color:var(--blue)">${r.payback_months} m</div>
-                    <div style="font-size:.6rem;color:var(--t2)">Payback</div>
-                </div>
-            `;
-        }
-        if (document.getElementById('finops-empty')) document.getElementById('finops-empty').style.display = 'none';
-    }
+    // ── FinOps Pilar — TCO + CostOptimizationAgent
+    _renderFinOpsAi(aiData?.business, aiData?.cost_optimization);
 
     _renderIaC(lastDetectedTechs, lastHost);
     window.triggerMermaid();
 };
+
+// ─── FinOps AI Renderer ───────────────────────────────────────────────────────
+function _renderFinOpsAi(biz, costOpt) {
+    const emptyEl = document.getElementById('finops-empty');
+    let hasContent = false;
+    const fmt = n => n != null ? '$' + Number(n).toLocaleString() : '—';
+
+    // ── TCO / ROI del BusinessAgent
+    const bizBox = document.getElementById('finops-business-box');
+    if (bizBox && biz?.risk_score) {
+        const csEl = document.getElementById('finops-csuite');
+        if (csEl && biz.c_suite_summary)
+            csEl.innerHTML = `<b style="color:var(--blue)">Para el C-Suite:</b> ${biz.c_suite_summary}`;
+
+        const legEl = document.getElementById('finops-tco-legacy');
+        if (legEl && biz.tco_legacy) {
+            const l = biz.tco_legacy;
+            const rows = [
+                ['Licenciamiento', l.annual_licensing, l.annual_licensing_detail],
+                ['Labor/Mant.', l.annual_labor_maintenance, l.annual_labor_detail],
+                ['Riesgo Seg.', l.annual_security_incidents_risk, l.annual_security_detail],
+                ['Downtime', l.annual_downtime_cost, l.annual_downtime_detail],
+                ['Compliance', l.annual_compliance_risk, l.annual_compliance_detail],
+            ].filter(([, v]) => v != null && v !== 0);
+            const rowsHtml = rows.length
+                ? rows.map(([k, v, d]) =>
+                    `<div style="display:flex;justify-content:space-between;font-size:.73rem;padding:.2rem 0;border-bottom:1px solid rgba(255,255,255,.04)">
+                        <span style="color:var(--t2)">${k}</span><span style="color:var(--red)">${fmt(v)}</span>
+                    </div>${d ? `<div style="font-size:.62rem;opacity:.5;line-height:1.3;margin-bottom:.1rem">${d}</div>` : ''}`
+                ).join('') +
+                `<div style="display:flex;justify-content:space-between;font-size:.8rem;font-weight:700;padding:.3rem 0">
+                    <span>Total Anual</span><span style="color:var(--red)">${fmt(l.total_annual)}</span>
+                </div>`
+                : fmt(l.total_annual);
+            legEl.innerHTML = rowsHtml;
+        }
+
+        const awsEl = document.getElementById('finops-tco-aws');
+        if (awsEl && biz.tco_aws) {
+            const a = biz.tco_aws;
+            const rows = [
+                ['ECS Fargate/mes', a.ecs_fargate_monthly, a.ecs_fargate_detail],
+                ['RDS Aurora/mes', a.rds_aurora_serverless_monthly, a.rds_detail],
+                ['ALB/mes', a.alb_monthly, null],
+                ['CloudWatch/mes', a.cloudwatch_monthly, null],
+            ].filter(([, v]) => v != null && v !== 0);
+            const rowsHtml = rows.length
+                ? rows.map(([k, v, d]) =>
+                    `<div style="display:flex;justify-content:space-between;font-size:.73rem;padding:.2rem 0;border-bottom:1px solid rgba(255,255,255,.04)">
+                        <span style="color:var(--t2)">${k}</span><span style="color:var(--green)">${fmt(v)}</span>
+                    </div>${d ? `<div style="font-size:.62rem;opacity:.5;line-height:1.3;margin-bottom:.1rem">${d}</div>` : ''}`
+                ).join('') +
+                `<div style="display:flex;justify-content:space-between;font-size:.8rem;font-weight:700;padding:.3rem 0">
+                    <span>Total Anual</span><span style="color:var(--green)">${fmt(a.total_annual)}</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-size:.72rem;padding:.15rem 0">
+                    <span style="color:var(--t2)">Migración (único)</span><span style="color:var(--yellow)">${fmt(a.migration_one_time_cost)}</span>
+                </div>`
+                : fmt(a.total_annual);
+            awsEl.innerHTML = rowsHtml;
+        }
+
+        const roiEl = document.getElementById('finops-roi-content');
+        if (roiEl && biz.roi) {
+            const r = biz.roi;
+            roiEl.innerHTML = [
+                { label: 'Ahorro Anual', val: fmt(r.annual_saving), color: 'var(--green)' },
+                { label: 'Ahorro 5 años', val: fmt(r.five_year_saving), color: 'var(--green)' },
+                { label: 'Payback', val: r.payback_months ? r.payback_months + ' meses' : '—', color: 'var(--blue)' },
+                { label: 'ROI', val: r.roi_pct ? r.roi_pct + '%' : '—', color: 'var(--yellow)' },
+            ].map(({ label, val, color }) =>
+                `<div style="text-align:center"><div style="font-size:1.1rem;font-weight:700;color:${color}">${val}</div><div style="font-size:.6rem;color:var(--t2)">${label}</div></div>`
+            ).join('');
+        }
+
+        bizBox.style.display = 'block';
+        hasContent = true;
+    }
+
+    // ── CostOptimizationAgent — Tabs IA
+    const tabsBox = document.getElementById('finops-tabs-box');
+    if (tabsBox && costOpt && Object.keys(costOpt).length > 0) {
+        _renderFinOpsMultiCloud(costOpt.multicloud);
+        _renderFinOpsOptimizer(costOpt.aws_optimization);
+        _renderFinOpsRightSizing(costOpt.rightsizing);
+        _renderFinOpsSprintCost(costOpt.sprint_cost);
+        tabsBox.style.display = 'block';
+        hasContent = true;
+    }
+
+    if (hasContent && emptyEl) emptyEl.style.display = 'none';
+}
 
 // ─── FinOps Pro Logic ─────────────────────────────────────────────────────────
 
@@ -2259,37 +2329,50 @@ window.loadFinOps = async function() {
     if (!lastScanId) return;
     const btn = document.getElementById('finops-load-btn');
     const badge = document.getElementById('finops-cache-badge');
-    if (btn) btn.disabled = true;
-    
+    if (btn) { btn.disabled = true; btn.innerText = '⏳ Cargando...'; }
+
     try {
         const apiUrl = window.API_URL || 'http://localhost:8000';
-        const r = await fetch(`${apiUrl}/finops/${lastScanId}`, { headers: authHeaders() });
-        if (!r.ok) throw new Error('Error cargando FinOps');
-        const res = await r.json();
-        
-        if (res.status === 'success') {
-            const d = res.data;
-            document.getElementById('finops-tabs-box').style.display = 'block';
-            if (badge) {
-                badge.innerText = 'Actualizado: ' + new Date(res.timestamp).toLocaleTimeString();
-                badge.style.display = 'inline';
-            }
-            
-            // 1. Multi-Cloud Tab
-            _renderFinOpsMultiCloud(d.multicloud);
-            // 2. AWS Optimizer Tab
-            _renderFinOpsOptimizer(d.aws_optimization);
-            // 3. Right-Sizing Tab
-            _renderFinOpsRightSizing(d.rightsizing);
-            // 4. Sprint Cost Tab
-            _renderFinOpsSprintCost(d.sprint_cost);
+        const r = await apiFetch(`${apiUrl}/finops/${lastScanId}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
 
-            if (document.getElementById('finops-empty')) document.getElementById('finops-empty').style.display = 'none';
+        // Update multi-cloud table with real API prices
+        const tbody = document.getElementById('finops-mc-table-body');
+        const pc = d.price_comparison || {};
+        const clouds = [
+            { id: 'aws',   label: 'AWS',   color: 'var(--yellow)' },
+            { id: 'azure', label: 'Azure', color: '#0078d4' },
+            { id: 'gcp',   label: 'GCP',   color: 'var(--green)' },
+        ];
+        if (tbody && pc.aws) {
+            tbody.innerHTML = clouds.map(({ id, label, color }) => {
+                const cloud = pc[id] || {};
+                const bd = cloud.breakdown || {};
+                const fmt = v => v ? `$${v}` : '—';
+                return `<tr>
+                    <td style="padding:.4rem;font-weight:700;color:${color}">${label}</td>
+                    <td style="text-align:right;padding:.4rem">${fmt(bd.container)}</td>
+                    <td style="text-align:right;padding:.4rem">${fmt(bd.database)}</td>
+                    <td style="text-align:right;padding:.4rem">${fmt(bd.cache)}</td>
+                    <td style="text-align:right;padding:.4rem">${fmt(bd.lb)}</td>
+                    <td style="text-align:right;padding:.4rem;font-weight:700;color:${color}">$${cloud.monthly_usd || '—'}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        if (badge) {
+            badge.style.display = 'inline';
+            badge.style.cssText = 'font-size:.62rem;padding:.15rem .5rem;border-radius:10px;' +
+                (d.cache_hit
+                    ? 'background:rgba(0,176,155,.15);color:var(--green);border:1px solid rgba(0,176,155,.4)'
+                    : 'background:rgba(0,163,255,.15);color:var(--blue);border:1px solid rgba(0,163,255,.4)');
+            badge.textContent = d.cache_hit ? '🟢 Precios cacheados' : '🔵 Precios actualizados';
         }
     } catch(e) {
-        console.error('FinOps Load Error:', e);
+        console.warn('FinOps load error:', e);
     } finally {
-        if (btn) btn.disabled = false;
+        if (btn) { btn.disabled = false; btn.innerText = '🔄 Actualizar Precios'; }
     }
 };
 
