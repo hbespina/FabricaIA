@@ -2356,7 +2356,7 @@ window.loadFinOps = async function() {
                     <td style="text-align:right;padding:.4rem">${fmt(bd.database)}</td>
                     <td style="text-align:right;padding:.4rem">${fmt(bd.cache)}</td>
                     <td style="text-align:right;padding:.4rem">${fmt(bd.lb)}</td>
-                    <td style="text-align:right;padding:.4rem;font-weight:700;color:${color}">$${cloud.monthly_usd || '—'}</td>
+                    <td style="text-align:right;padding:.4rem;font-weight:700;color:${color}">${fmt(cloud.monthly_usd)}</td>
                 </tr>`;
             }).join('');
         }
@@ -2429,7 +2429,7 @@ function _renderFinOpsMultiCloud(mc) {
 function _renderFinOpsOptimizer(opt) {
     if (!opt) return;
     const sumEl = document.getElementById('finops-opt-summary');
-    if (sumEl) sumEl.innerHTML = `Potencial de Ahorro: <b style="color:var(--green)">${opt.estimated_savings_pct}%</b> | Cobertura Savings Plans: <b style="color:var(--blue)">${(opt.savings_plans_coverage*100).toFixed(0)}%</b>`;
+    if (sumEl) sumEl.innerHTML = `Potencial de Ahorro: <b style="color:var(--green)">${opt.estimated_savings_pct ?? '—'}%</b> | Cobertura Savings Plans: <b style="color:var(--blue)">${((opt.savings_plans_coverage ?? 0)*100).toFixed(0)}%</b>`;
     
     const listEl = document.getElementById('finops-opt-list');
     if (listEl && opt.recommendations) {
