@@ -2132,6 +2132,65 @@ function _renderBusiness(biz) {
     box.style.display = 'block';
 }
 
+// ─── SRE Pilar Renderer ───────────────────────────────────────────────────────
+function _renderSre(cn) {
+    if (!cn) return;
+    let hasContent = false;
+    const emptyEl = document.getElementById('sre-empty');
+
+    // Healthchecks
+    const healthBox  = document.getElementById('sre-health-box');
+    const healthCont = document.getElementById('sre-health-content');
+    const hc = cn.healthcheck_config || {};
+    if (healthBox && healthCont && (hc.liveness || hc.readiness || hc.startup)) {
+        const renderProbe = (label, cfg) => cfg ? `
+            <div style="margin-bottom:.6rem">
+                <div style="font-size:.68rem;font-weight:700;color:var(--blue);margin-bottom:.2rem">${label}</div>
+                <pre style="font-size:.65rem;background:rgba(0,0,0,.4);border:1px solid rgba(0,163,255,.15);border-radius:6px;padding:.5rem;overflow:auto;max-height:160px">${
+                    typeof cfg === 'string' ? cfg : JSON.stringify(cfg, null, 2)
+                }</pre>
+            </div>` : '';
+        healthCont.innerHTML = renderProbe('Liveness Probe', hc.liveness)
+            + renderProbe('Readiness Probe', hc.readiness)
+            + renderProbe('Startup Probe', hc.startup);
+        healthBox.style.display = 'block';
+        hasContent = true;
+    }
+
+    // 12-Factor violations
+    const f12Box  = document.getElementById('sre-12factor-box');
+    const f12List = document.getElementById('sre-12factor-list');
+    if (f12Box && f12List && cn.twelve_factor_violations?.length) {
+        f12List.innerHTML = cn.twelve_factor_violations.map(v => `
+            <div style="padding:.5rem .8rem;background:rgba(249,212,35,.06);border:1px solid rgba(249,212,35,.2);border-radius:8px;margin-bottom:.4rem">
+                <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.2rem">
+                    <span style="font-weight:700;font-size:.78rem">${v.factor || v.title || ''}</span>
+                    <span style="font-size:.62rem;color:var(--yellow);background:rgba(249,212,35,.1);padding:.1rem .4rem;border-radius:5px">${v.severity || 'MEDIUM'}</span>
+                </div>
+                <div style="font-size:.73rem;color:var(--t2)">${v.issue || v.description || ''}</div>
+                ${v.fix ? `<div style="font-size:.7rem;color:var(--green);margin-top:.25rem">✓ Fix: ${v.fix}</div>` : ''}
+            </div>`).join('');
+        f12Box.style.display = 'block';
+        hasContent = true;
+    }
+
+    // SRE Runbooks
+    const rbBox  = document.getElementById('sre-runbook-box');
+    const rbList = document.getElementById('sre-runbook-list');
+    if (rbBox && rbList && cn.sre_runbook?.length) {
+        rbList.innerHTML = cn.sre_runbook.map(r => `
+            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:8px;padding:.7rem 1rem">
+                <div style="font-weight:700;font-size:.8rem;color:var(--blue);margin-bottom:.15rem">${r.title || ''}</div>
+                ${r.trigger ? `<div style="font-size:.7rem;color:var(--yellow);margin-bottom:.4rem">⚡ ${r.trigger}</div>` : ''}
+                ${r.steps?.length ? `<ol style="margin:0;padding-left:1.1rem">${r.steps.map(s => `<li style="font-size:.7rem;color:#ddd;padding:.1rem 0">${s}</li>`).join('')}</ol>` : ''}
+            </div>`).join('');
+        rbBox.style.display = 'block';
+        hasContent = true;
+    }
+
+    if (hasContent && emptyEl) emptyEl.style.display = 'none';
+}
+
     // ── Resumen Ejecutivo
     const execBox  = document.getElementById('exec-box');
     const execSum  = document.getElementById('exec-summary');
@@ -2160,40 +2219,8 @@ function _renderBusiness(biz) {
     const sp3 = aiData?.sprints?.sprint_3 || [];
     document.getElementById('plan').innerHTML = spB('SPRINT 0', sp0) + spB('SPRINT 1', sp1) + spB('SPRINT 2', sp2) + spB('SPRINT 3', sp3);
 
-    // ── CloudNative / SRE Content (Pilar 4 - SRE)
-    const cn = aiData?.cloudnative || {};
-    const sreHealthBox = document.getElementById('sre-health-box');
-    const sre12Box     = document.getElementById('sre-12factor-box');
-    const sreRunBox    = document.getElementById('sre-runbook-box');
-    
-    // Healthchecks en p4
-    if (cn.healthcheck_config && sreHealthBox) {
-        const hc = cn.healthcheck_config;
-        document.getElementById('sre-health-content').innerHTML = `
-            <div style="font-size:.72rem;color:var(--green)">LIVENESS: ${hc.liveness_probe || '—'}</div>
-            <div style="font-size:.72rem;color:var(--blue)">READINESS: ${hc.readiness_probe || '—'}</div>
-        `;
-        sreHealthBox.style.display = 'block';
-    }
-
-    // 12-factor en p4
-    if (cn.twelve_factor_violations?.length && sre12Box) {
-        document.getElementById('sre-12factor-list').innerHTML = cn.twelve_factor_violations.map(v => 
-            `<div style="font-size:.72rem;color:var(--yellow);padding:.2rem 0">⚠ ${v}</div>`
-        ).join('');
-        sre12Box.style.display = 'block';
-        if (document.getElementById('sre-empty')) document.getElementById('sre-empty').style.display = 'none';
-    }
-
-    // Runbooks en p4
-    if (cn.sre_runbook?.length && sreRunBox) {
-        document.getElementById('sre-runbook-list').innerHTML = cn.sre_runbook.map(r => `
-            <div style="background:rgba(0,0,0,.3);padding:.6rem;border-radius:8px">
-                <div style="font-weight:700;font-size:.78rem;color:var(--blue)">${r.title}</div>
-                <div style="font-size:.68rem;color:var(--t2)">${r.trigger || ''}</div>
-            </div>`).join('');
-        sreRunBox.style.display = 'block';
-    }
+    // ── SRE Pilar — Healthchecks, 12-Factor, Runbooks
+    _renderSre(aiData?.cloudnative);
 
     // ── Business / TCO / ROI (Pilar 5 - FinOps)
     const biz = aiData?.business;
