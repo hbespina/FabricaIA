@@ -2806,6 +2806,201 @@ async def get_aws_pricing(scan_id: str, env: str = "prod", region: str = "us-eas
     }
 
 
+# ─── FinOps — Fetchers de precios públicos ────────────────────────────────────
+
+def _fetch_azure_prices(region: str = "eastus") -> dict:
+    """Llama Azure Retail Prices API (sin auth). Retorna dict service→$/hr."""
+    import requests as req
+    baseline = {
+        "container": 0.0160,
+        "database":  0.0340,
+        "cache":     0.0340,
+        "lb":        0.0250,
+    }
+    try:
+        url = (
+            "https://prices.azure.com/api/retail/prices"
+            "?$filter=priceType eq 'Consumption' and armRegionName eq '"
+            + region + "' and contains(skuName,'D2s') and serviceName eq 'Container Instances'"
+        )
+        r = req.get(url, timeout=8)
+        if r.ok:
+            items = r.json().get("Items", [])
+            for item in items:
+                if "Linux" in item.get("skuName", "") and item.get("unitPrice", 0) > 0:
+                    baseline["container"] = round(item["unitPrice"] / 4, 6)
+                    break
+    except Exception as e:
+        logger.warning("Azure Pricing API error: %s", e)
+    return baseline
+
+
+def _fetch_gcp_prices(region: str = "us-east1") -> dict:
+    """Retorna precios GCP baseline 2025. Si GCP_API_KEY está configurado, intenta API real."""
+    import requests as req
+    baseline = {
+        "container": 0.0000240 * 3600,
+        "database":  0.0250,
+        "cache":     0.0490,
+        "lb":        0.0080,
+    }
+    api_key = os.getenv("GCP_API_KEY", "")
+    if not api_key:
+        return baseline
+    try:
+        svc_id = "9662-B51E-5089"
+        url = f"https://cloudbilling.googleapis.com/v1/services/{svc_id}/skus?key={api_key}"
+        r = req.get(url, timeout=8)
+        if r.ok:
+            for sku in r.json().get("skus", []):
+                if "CPU" in sku.get("description", "") and region in str(sku.get("serviceRegions", [])):
+                    tiers = sku.get("pricingInfo", [{}])[0].get("pricingExpression", {}).get("tieredRates", [])
+                    if tiers:
+                        nano = tiers[-1].get("unitPrice", {}).get("nanos", 0)
+                        baseline["container"] = round(float(nano) / 1e9 * 3600, 6)
+                    break
+    except Exception as e:
+        logger.warning("GCP Pricing API error: %s", e)
+    return baseline
+
+
+def _get_cached_prices(cloud: str, region: str) -> dict | None:
+    """Retorna precios cacheados si son < 24h. None si expirados o inexistentes."""
+    try:
+        conn, _ = _get_conn()
+        rows = conn.execute(
+            "SELECT service, price_usd_hr, fetched_at FROM pricing_cache WHERE cloud=? AND region=?",
+            (cloud, region)
+        ).fetchall()
+        conn.close()
+        if not rows:
+            return None
+        now = datetime.utcnow()
+        prices = {}
+        for row in rows:
+            fetched = datetime.fromisoformat(row[2])
+            if (now - fetched).total_seconds() > 86400:
+                return None
+            prices[row[0]] = row[1]
+        return prices if prices else None
+    except Exception:
+        return None
+
+
+def _save_prices_to_cache(cloud: str, region: str, prices: dict):
+    """Guarda precios en pricing_cache. Upsert por (cloud, service, region)."""
+    try:
+        conn, _ = _get_conn()
+        now = datetime.utcnow().isoformat()
+        for service, price in prices.items():
+            conn.execute(
+                """INSERT OR REPLACE INTO pricing_cache (cloud, service, region, price_usd_hr, fetched_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (cloud, service, region, price, now)
+            )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning("Error guardando pricing_cache: %s", e)
+
+
+@app.get("/finops/{scan_id}")
+async def get_finops(scan_id: str, region: str = "us-east-1", _user: str = Depends(verify_auth)):
+    """
+    Retorna análisis FinOps completo: ai_analysis del CostOptimizationAgent
+    + price_comparison multi-cloud con precios reales normalizados.
+    """
+    conn, db_type = _get_conn()
+    if db_type == "sqlite":
+        conn.row_factory = sqlite3.Row
+    ph = _ph(db_type)
+    row = conn.execute(
+        f"SELECT hostname, bedrock_blueprint FROM scan_history WHERE id = {ph}",
+        (scan_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404, "Scan no encontrado")
+
+    rd = dict(row)
+    try:
+        bp = json.loads(rd.get("bedrock_blueprint") or "{}")
+    except Exception:
+        bp = {}
+
+    ai_analysis = bp.get("cost_optimization", {})
+
+    az_region_map = {
+        "us-east-1": "eastus", "us-west-2": "westus2",
+        "eu-west-1": "westeurope", "ap-southeast-1": "southeastasia",
+    }
+    az_region = az_region_map.get(region, "eastus")
+    gcp_region_map = {
+        "us-east-1": "us-east1", "us-west-2": "us-west2",
+        "eu-west-1": "europe-west1", "ap-southeast-1": "asia-southeast1",
+    }
+    gcp_region = gcp_region_map.get(region, "us-east1")
+
+    HOURS_MONTH = 730
+    p = _PRICING_BASELINE
+    aws_prices = {
+        "container": round(p["fargate_vcpu_hour"] * 0.5 + p["fargate_gb_hour"] * 1.0, 6),
+        "database":  p.get("rds_mysql_hour", 0.034),
+        "cache":     p.get("elasticache_hour", 0.034),
+        "lb":        p.get("alb_hour", 0.008),
+    }
+
+    cache_hit_az = False
+    az_prices = _get_cached_prices("azure", az_region)
+    if az_prices:
+        cache_hit_az = True
+    else:
+        az_prices = _fetch_azure_prices(az_region)
+        _save_prices_to_cache("azure", az_region, az_prices)
+
+    cache_hit_gcp = False
+    gcp_prices = _get_cached_prices("gcp", gcp_region)
+    if gcp_prices:
+        cache_hit_gcp = True
+    else:
+        gcp_prices = _fetch_gcp_prices(gcp_region)
+        _save_prices_to_cache("gcp", gcp_region, gcp_prices)
+
+    has_db    = bool(bp.get("business", {}).get("tco_aws", {}).get("rds_aurora_serverless_monthly", 0))
+    has_cache = "cache" in str(bp).lower() or "redis" in str(bp).lower()
+    has_lb    = True
+
+    def _monthly(prices: dict, use_db: bool, use_cache: bool, use_lb: bool) -> dict:
+        container = round(prices["container"] * HOURS_MONTH, 2)
+        db        = round(prices["database"]  * HOURS_MONTH, 2) if use_db    else 0
+        cache     = round(prices["cache"]     * HOURS_MONTH, 2) if use_cache else 0
+        lb        = round(prices["lb"]        * HOURS_MONTH, 2) if use_lb    else 0
+        return {
+            "container": container, "database": db,
+            "cache": cache, "lb": lb,
+            "total": round(container + db + cache + lb, 2)
+        }
+
+    aws_monthly = _monthly(aws_prices,  has_db, has_cache, has_lb)
+    az_monthly  = _monthly(az_prices,   has_db, has_cache, has_lb)
+    gcp_monthly = _monthly(gcp_prices,  has_db, has_cache, has_lb)
+
+    return {
+        "scan_id":      scan_id,
+        "hostname":     rd.get("hostname"),
+        "region":       region,
+        "ai_analysis":  ai_analysis,
+        "price_comparison": {
+            "aws":   {"monthly_usd": aws_monthly["total"], "breakdown": aws_monthly},
+            "azure": {"monthly_usd": az_monthly["total"],  "breakdown": az_monthly},
+            "gcp":   {"monthly_usd": gcp_monthly["total"], "breakdown": gcp_monthly},
+        },
+        "cache_hit":    cache_hit_az and cache_hit_gcp,
+        "fetched_at":   datetime.utcnow().isoformat(),
+        "note": "Precios normalizados a 0.5 vCPU / 1 GB / mes. Costos reales varían por región y configuración.",
+    }
+
+
 # ─── IaC Validator — Sprint 4 ─────────────────────────────────────────────────
 @app.get("/validate/iac/{scan_id}")
 async def validate_iac(scan_id: str, _user: str = Depends(verify_auth)):
