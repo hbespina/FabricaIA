@@ -73,8 +73,8 @@ MAX_CHARS = 150_000
 
 # Cadena de modelos — se intenta en orden hasta que uno funcione
 MODEL_CHAIN = [
-    {"id": "amazon.nova-pro-v1:0",   "maxTokens": 5120, "label": "Nova Pro"},
     {"id": "amazon.nova-lite-v1:0",  "maxTokens": 5120, "label": "Nova Lite"},
+    {"id": "amazon.nova-pro-v1:0",   "maxTokens": 5120, "label": "Nova Lite"},
     {"id": "amazon.nova-micro-v1:0", "maxTokens": 4096, "label": "Nova Micro"},
 ]
 
@@ -388,6 +388,17 @@ def init_db():
         )
     """)
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS pricing_cache (
+            cloud        TEXT NOT NULL,
+            service      TEXT NOT NULL,
+            region       TEXT NOT NULL,
+            price_usd_hr REAL NOT NULL,
+            fetched_at   TEXT NOT NULL,
+            PRIMARY KEY (cloud, service, region)
+        )
+    """)
+
     # Migracion: agregar columnas nuevas si la tabla ya existia sin ellas
     if db_type == "sqlite":
         existing = {row[1] for row in c.execute("PRAGMA table_info(scan_history)")}
@@ -687,79 +698,145 @@ def _rag_retrieve(inventory_text: str, top_k: int = 3) -> str:
 
 # ─── Agentic Prompts ──────────────────────────────────────────────────────────
 _AGENT_SECURITY_PROMPT = """
-Eres un CISO Senior especializado en seguridad de aplicaciones Java Enterprise y remediación de CVEs.
+Eres un CISO Senior y Penetration Tester especializado en seguridad de aplicaciones Java Enterprise.
+Tu análisis alimenta directamente el plan de migración — los CVEs CRITICO que listes en sprint1_mandatory
+son OBLIGATORIOS en Sprint 1. Sin excepción.
 
-REGLA CRÍTICA: Si encuentras CVEs con severidad CRITICO, el campo sprint1_mandatory DEBE listar
-las acciones de parcheo con el JAR exacto y la versión segura destino. El plan de migración
-DEPENDE de tu output para forzar esas tareas en Sprint 1.
+INSTRUCCIONES:
+1. Analiza CADA dependencia del inventario contra CVEs conocidos (Log4Shell, Spring4Shell, Text4Shell, Struts2, etc.)
+2. Evalúa los patrones de bytecode: JNDI lookups, MD5/DES, Runtime.exec, ObjectInputStream → vectores de ataque reales
+3. Detecta configuraciones inseguras: puertos expuestos, credenciales hardcodeadas, TLS ausente
+4. Clasifica componentes EOL con fecha exacta de fin de soporte
+5. Calcula la superficie de ataque total: número de endpoints, protocolos expuestos, datos sensibles en tránsito
+
+REGLA: Mínimo 5 security_findings. Si el inventario muestra pocas dependencias, analiza los patrones
+de código (MD5, DES, Runtime.exec, hardcoded credentials) como findings adicionales.
 
 Retorna ÚNICAMENTE JSON válido:
 {{
   "security_findings": [
-    {{"sev": "CRITICO|ALTO|MEDIO", "component": "jar-version.jar", "cve": "CVE-XXXX-YYYY",
-      "cvss": 9.8,
-      "description": "descripción técnica del vector de ataque",
-      "mitigation": "mvn dependency:force-version -Dartifact=groupId:artifactId:VERSION_SEGURA",
-      "safe_version": "X.Y.Z"}}
+    {{
+      "sev": "CRITICO|ALTO|MEDIO|BAJO",
+      "component": "log4j-core-2.14.1.jar",
+      "cve": "CVE-2021-44228",
+      "cvss": 10.0,
+      "description": "JNDI injection via ${jndi:ldap://...} en mensajes de log — RCE sin autenticación",
+      "mitigation": "mvn versions:use-dep-version -Dincludes=org.apache.logging.log4j:log4j-core -DdepVersion=2.17.1",
+      "safe_version": "2.17.1",
+      "exploit_complexity": "LOW — PoC público disponible",
+      "data_exposure": "Control total del servidor, exfiltración de credenciales"
+    }}
   ],
   "sprint1_mandatory": [
-    "Actualizar log4j-core 2.14.1 → 2.17.1 (CVE-2021-44228 CVSS 10.0) — DevSecOps — 0.5d",
-    "Deshabilitar JNDI lookup: -Dlog4j2.formatMsgNoLookups=true — DevOps — 0.25d"
+    "CRÍTICO [DevSecOps][0.5d]: Actualizar log4j-core 2.14.1 → 2.17.1 — elimina CVE-2021-44228 CVSS 10.0",
+    "CRÍTICO [DevOps][0.25d]: Añadir -Dlog4j2.formatMsgNoLookups=true como workaround inmediato",
+    "ALTO [Dev][1d]: Reemplazar MD5/DES por SHA-256/AES-256 en clases de cifrado detectadas"
   ],
-  "critical_ports": ["1521:Oracle DB — expuesto sin TLS"],
-  "eol_components": ["Java 8 — EoL Oracle 2030, sin módulos, sin virtual threads"],
-  "attack_surface": "descripción de la superficie de ataque real basada en puertos y componentes detectados"
+  "critical_ports": [
+    "8080: HTTP sin TLS — credenciales en texto plano",
+    "1521: Oracle listener — expuesto a red interna sin firewall"
+  ],
+  "eol_components": [
+    "Java 8: Oracle Extended Support hasta Dic 2030 — sin Virtual Threads, sin módulos JPMS",
+    "Struts 2.x: EOL — múltiples RCE públicos (CVE-2017-5638, CVE-2018-11776)"
+  ],
+  "hardcoded_secrets": [
+    "JDBC URL con password en texto plano detectada en bytecode — mover a AWS Secrets Manager"
+  ],
+  "attack_surface": "Aplicación expone X endpoints HTTP sin TLS. Bytecode contiene JNDI lookups activos (Log4Shell). Credenciales DB hardcodeadas en X clases. Deserialización insegura en Y clases (ObjectInputStream). Superficie total: ALTA.",
+  "compliance_gaps": [
+    "OWASP A06:2021 — Componentes vulnerables y desactualizados",
+    "OWASP A02:2021 — Fallos criptográficos (MD5, DES detectados)"
+  ]
 }}
 """
 
 _AGENT_MIGRATION_PROMPT = """
-Eres un Distinguished Cloud Architect Senior (AWS) especializado en modernización JEE → Spring Boot 3.x / Java 21.
+Eres un Distinguished Cloud Architect Senior (AWS Certified) y Program Manager con 15 años modernizando aplicaciones JEE críticas.
+ESPECIALIDAD: Planificación detallada de migración, gestión de riesgos técnicos, roadmaps ejecutables.
 
-REGLA DE ORO: Si recibes hallazgos de seguridad con sprint1_mandatory, el Sprint 1 de tu plan
-DEBE comenzar con esas tareas de parcheo. No es opcional.
+REGLA DE ORO: Si recibes hallazgos de seguridad con sprint1_mandatory, el Sprint 0 de tu plan
+DEBE comenzar EXACTAMENTE con esas tareas de parcheo en el orden dado. No es opcional ni negociable.
 
-TARGET DE MIGRACIÓN: Spring Boot 3.2+ con Java 21 (LTS). Usa Virtual Threads donde aplique.
-RUNTIME AWS TARGET: ECS Fargate (stateless) o EKS (orquestación compleja).
+TARGET DE MIGRACIÓN: Spring Boot 3.2+ con Java 21 (LTS). Usa Virtual Threads (Project Loom) donde aplique.
+RUNTIME AWS TARGET: ECS Fargate (stateless) o EKS si hay >5 microservicios.
+
+INSTRUCCIÓN CRÍTICA DE CALIDAD:
+- Cada tarea de sprint DEBE referenciar componentes REALES del inventario (nombres de JARs, clases, EJBs)
+- Los sprints deben tener MÍNIMO 4 tareas cada uno con estimaciones de esfuerzo realistas
+- La estrategia de migración debe justificarse con patrones JEE específicos detectados
+- El risk_matrix debe cubrir los riesgos técnicos más críticos del inventario con mitigaciones ejecutables
+- quick_wins: identifica las 4-6 acciones de mayor impacto/menor esfuerzo del inventario real
 
 Retorna ÚNICAMENTE JSON válido:
 {{
   "migration_strategy": {{
     "approach": "strangler-fig|re-architect|repackage|lift-and-shift",
-    "rationale": "justificación técnica basada en patrones JEE detectados",
+    "rationale": "justificación técnica detallada (3+ oraciones) basada en patrones JEE REALES detectados: qué específicamente impide lift-and-shift, por qué se eligió este approach sobre los demás, qué patrones JEE son los más costosos de mantener",
     "target_runtime": "ECS Fargate|EKS|Lambda|Elastic Beanstalk",
     "target_java": "Java 21 LTS",
     "target_framework": "Spring Boot 3.2",
-    "total_weeks": 8,
-    "phases": 4
+    "total_weeks": 10,
+    "phases": 4,
+    "critical_path": "descripción de la dependencia crítica más importante: qué debe resolverse antes de qué"
   }},
   "sprints": {{
     "sprint_0": [
-      "SEGURIDAD [DevSecOps][0.5d]: Actualizar CVEs críticos — [MANDATORIO del SecurityAgent]",
-      "INVENTARIO [Architect][1d]: Mapear EJBs detectados a Spring @Service equivalentes"
+      {{"title": "tarea concreta con componente REAL", "description": "qué exactamente hacer, comando o patrón", "effort": "Xd", "owner": "DevSecOps|Dev|DevOps|Architect", "depends_on": "N/A o tarea anterior"}},
+      {{"title": "tarea 2", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
+      {{"title": "tarea 3 — MÍNIMO 4 tareas por sprint", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
+      {{"title": "tarea 4", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}}
     ],
     "sprint_1": [
-      "CONTAINERIZACIÓN [DevOps][2d]: Crear Dockerfile multi-stage distroless + CI/CD pipeline",
-      "REFACTOR [Dev][3d]: Transformar Servlets → @RestController con Spring Boot 3.x"
+      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
+      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
+      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
+      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}}
     ],
     "sprint_2": [
-      "PERSISTENCIA [Dev][3d]: Migrar SQL hardcodeado a Spring Data JPA repositories",
-      "CONFIG [DevOps][1d]: Externalizar JNDI/JDBC → AWS Secrets Manager + SSM Parameter Store"
+      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
+      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
+      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
+      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}}
     ],
     "sprint_3": [
-      "IAC [DevOps][2d]: Desplegar RDS Aurora + ECS Fargate con Terraform",
-      "OBSERVABILIDAD [SRE][2d]: CloudWatch + X-Ray + health endpoints /actuator/health"
+      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
+      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
+      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
+      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}}
     ]
   }},
   "quick_wins": [
-    {{"title": "acción concreta con clase o JAR real", "description": "exactamente qué hacer",
-      "effort": "Xd", "risk_reduction": "CVE-XXXX eliminado o riesgo reducido", "owner": "DevSecOps|Dev|DevOps"}}
+    {{"title": "acción concreta con clase o JAR REAL del inventario",
+      "description": "exactamente qué hacer: comando, archivo, clase — no genérico",
+      "effort": "Xd",
+      "risk_reduction": "CVE-XXXX eliminado o riesgo específico reducido",
+      "owner": "DevSecOps|Dev|DevOps",
+      "immediate_benefit": "qué mejora inmediata produce en seguridad/estabilidad/rendimiento"}}
   ],
   "risk_matrix": [
-    {{"risk": "componente real con versión", "cve": "CVE-XXXX o N/A",
-      "probability": "Alta|Media|Baja", "impact": "Crítico|Alto|Medio",
-      "mitigation": "acción concreta con herramienta o comando"}}
+    {{"risk": "componente REAL con versión del inventario",
+      "cve": "CVE-XXXX con CVSS o N/A",
+      "probability": "Alta|Media|Baja",
+      "impact": "Crítico|Alto|Medio",
+      "mitigation": "acción concreta con herramienta o comando específico",
+      "sprint": "sprint_0|sprint_1|sprint_2|sprint_3"}}
+  ],
+  "definition_of_done": [
+    "criterio medible y binario que indica que la migración está completa",
+    "ejemplo: docker build exitoso sin dependencias del servidor de aplicaciones",
+    "ejemplo: /actuator/health devuelve 200 en ECS Fargate",
+    "ejemplo: 0 CVEs críticos en reporte OWASP Dependency-Check"
   ]
 }}
+
+REGLAS:
+- NUNCA uses nombres genéricos: siempre referencias al inventario real (JARs, clases, EJBs, datasources detectados).
+- Si el inventario muestra EJBs: sprint_0 debe incluir mapeo de todos los EJBs a @Service/@Stateless equivalentes.
+- Si hay SQL hardcodeado: sprint_1 o sprint_2 debe incluir migración a Spring Data JPA.
+- Si hay javax.*: sprint_1 debe incluir la migración masiva javax.* → jakarta.* con sed/refactoring tool.
+- risk_matrix: MÍNIMO 5 riesgos, incluyendo los CVEs reales del inventario.
+- quick_wins: MÍNIMO 4 items, ordenados de mayor a menor impacto/esfuerzo ratio.
 """
 
 _AGENT_CLOUDNATIVE_PROMPT = """
@@ -850,75 +927,144 @@ REGLAS CRÍTICAS:
 """
 
 _AGENT_CODE_PROMPT = """
-Eres un Staff Engineer Senior especializado en refactoring de aplicaciones JEE hacia Spring Boot 3.x / Java 21.
-TARGET: Spring Boot 3.2+, Java 21 LTS, Jakarta EE 10 (javax.* → jakarta.*).
+Eres un Staff Engineer Senior con 15 años de experiencia modernizando aplicaciones Java Enterprise.
+ESPECIALIDAD: Refactoring profundo JEE → Spring Boot 3.x / Java 21, análisis de bytecode, deuda técnica.
+TARGET: Spring Boot 3.2+, Java 21 LTS, Jakarta EE 10 (javax.* → jakarta.*), Virtual Threads (Project Loom).
+
+INSTRUCCIÓN CRÍTICA: Analiza CADA clase y patrón del [BYTECODE_DATA]. Identifica:
+- Servlets sin migrar a @RestController
+- EJB Session Beans sin migrar a @Service/@Transactional
+- JNDI lookups sin migrar a @Value/@ConfigurationProperties
+- SQL hardcodeado sin migrar a Spring Data JPA / @Query
+- Acoplamiento a servidor de aplicaciones (WebLogic/JBoss/WAS APIs)
+- Uso de javax.* (deprecated en Spring Boot 3.x, debe ser jakarta.*)
+- Anti-patrones: God Class, Feature Envy, Singleton con estado mutable
+- Threads manuales que deben reemplazarse con Virtual Threads
 
 Retorna ÚNICAMENTE JSON válido:
 {{
-  "agent_analysis": "Análisis técnico en 4+ párrafos: (1) stack detectado con versiones, (2) deuda técnica específica por patrón JEE, (3) impacto del acoplamiento en containerización, (4) ruta concreta de refactoring con clases reales",
+  "agent_analysis": "Análisis técnico en 5+ párrafos detallados: (1) Stack exacto detectado con versiones del bytecode y descriptores XML, (2) Inventario completo de antipatrones JEE con clases concretas y severidad, (3) Impacto del acoplamiento al servidor de aplicaciones en la containerización — qué específicamente romperá en Docker, (4) Deuda técnica acumulada: cálculo de horas técnicas y riesgo de regresión por módulo, (5) Ruta de refactoring priorizada: orden exacto de transformaciones con justificación técnica y dependencias entre tareas",
   "code_remediation": [
-    {{"file": "com.empresa.ClaseReal",
-      "issue": "antipatrón específico detectado en bytecode",
-      "action": "cambio exacto requerido para Spring Boot 3.x",
-      "before": "fragmento JEE legacy (< 6 líneas)",
-      "after": "fragmento Spring Boot 3.x + Java 21 (< 6 líneas)",
-      "effort": "Xh", "priority": "P1-Crítico|P2-Alto|P3-Medio",
-      "benefit": "qué riesgo o deuda elimina"}}
+    {{"file": "com.empresa.paquete.ClaseReal (nombre REAL del bytecode, nunca placeholder)",
+      "issue": "antipatrón específico: tipo JEE detectado + qué rompe en containerización",
+      "action": "cambio exacto requerido para Spring Boot 3.x — importaciones, anotaciones, método",
+      "before": "código legacy real o representativo (4-8 líneas)",
+      "after": "código Spring Boot 3.2 + Java 21 correcto (4-8 líneas)",
+      "effort": "Xh",
+      "priority": "P1-Crítico|P2-Alto|P3-Medio",
+      "benefit": "impacto concreto: CVE eliminado / portabilidad ganada / rendimiento mejorado"}}
   ],
   "current_architecture": {{
     "coupling_score": 8,
-    "coupling_analysis": "descripción del acoplamiento con nombres de componentes reales del inventario",
-    "pain_points": ["SPOF real con impacto concreto en containerización"]
+    "coupling_analysis": "análisis detallado del acoplamiento con nombres de CADA componente del inventario: EJBs, Servlets, MBeans, JNDI resources y su interdependencia",
+    "pain_points": [
+      "bloqueador concreto 1 que impide containerización directa con componente real",
+      "bloqueador concreto 2 con impacto en CI/CD",
+      "deuda técnica 3 con coste de mantenimiento cuantificado"
+    ],
+    "containerization_blockers": [
+      {{"component": "nombre real", "blocker": "descripción técnica exacta", "resolution": "cómo resolverlo en Spring Boot 3.x"}}
+    ]
+  }},
+  "tech_debt_summary": {{
+    "critical_items": 0,
+    "high_items": 0,
+    "estimated_refactor_days": 0,
+    "javax_to_jakarta_count": 0,
+    "hardcoded_configs_count": 0
   }}
 }}
-REGLA: Usa clases REALES del [BYTECODE_DATA]. Máximo 4 ítems en code_remediation.
-Migración javax.* → jakarta.*: en Spring Boot 3.x el namespace cambió completamente.
+
+REGLAS:
+- MÍNIMO 6 ítems en code_remediation — si el bytecode tiene pocas clases visibles, analiza los descriptores XML (web.xml, ejb-jar.xml, persistence.xml) y las dependencias.
+- Clases REALES del [BYTECODE_DATA] o [INFRA_AS_IS]. Si no hay clases visibles, usa patrones deducidos de las dependencias y tipo de artefacto.
+- Migración javax.* → jakarta.*: en Spring Boot 3.x el namespace cambió completamente — citar cada uno encontrado.
+- Virtual Threads: cualquier ExecutorService/Thread manual debe marcarse como candidato.
+- NUNCA uses "ClaseEjemplo", "MiServlet", "com.empresa.Ejemplo" — siempre nombres derivados del inventario real.
 """
 
 _AGENT_BUSINESS_PROMPT = """
-Eres un Cloud FinOps Architect Senior. Recibes un inventario de servidor/aplicación legacy y calculas
-el análisis financiero comparativo: costo de mantener legacy vs migrar a AWS.
+Eres un Cloud FinOps Architect Senior y Technology Risk Advisor con 15 años de experiencia.
+Especializacion: análisis TCO/ROI de modernización legacy → AWS, modelado financiero de riesgo técnico.
 
-Usa los datos del inventario para personalizar los cálculos — no uses números genéricos.
+INSTRUCCIÓN CRÍTICA: Personaliza TODOS los números usando el inventario real:
+- CVEs detectados → riesgo de breach según IBM Cost of Data Breach 2024 ($4.88M promedio global)
+- Versiones EoL (Java 8, WebLogic 12, Struts 1.x) → costo de licencia/soporte fuera de ciclo
+- Número de servidores/hosts → multiplicar costos de infraestructura
+- Stack tecnológico → estimar sizing AWS correcto (ECS cpu/memory, RDS class)
+- Si hay BD detectada → incluir costo de RDS. Si no hay BD → NO incluir RDS en tco_aws.
+
 Retorna ÚNICAMENTE JSON válido:
 {{
   "risk_score": 8.5,
-  "risk_rationale": "por qué ese score basado en CVEs, EoL y acoplamiento detectados",
+  "risk_rationale": "justificación detallada del score: CVEs críticos con CVSS score, versiones EoL exactas detectadas, tiempo sin parchear estimado, exposición de datos detectada en inventario",
 
   "tco_legacy": {{
     "annual_licensing": 45000,
+    "annual_licensing_detail": "desglose: WebLogic Enterprise $35k + Oracle DB $10k (o lo que aplique del inventario)",
     "annual_labor_maintenance": 80000,
+    "annual_labor_detail": "2 FTE senior Java ($60k) + 1 DBA part-time ($20k) — ajustar según stack detectado",
     "annual_security_incidents_risk": 120000,
+    "annual_security_detail": "CVE-XXXX CVSS 9.8: prob 15% × $800k breach = $120k expected loss anual",
     "annual_downtime_cost": 15000,
-    "total_annual": 260000,
-    "five_year_total": 1300000
+    "annual_downtime_detail": "SLA 99.5% = 43.8h downtime × $342/h revenue impact estimado",
+    "annual_compliance_risk": 25000,
+    "annual_compliance_detail": "multa GDPR/SOC2 por dependencias sin parchear: estimado conservador",
+    "total_annual": 285000,
+    "five_year_total": 1425000
   }},
 
   "tco_aws": {{
     "ecs_fargate_monthly": 180,
+    "ecs_fargate_detail": "2 tasks × 0.5vCPU/1GB × 730h = $180/mes (ajustar si app grande)",
     "rds_aurora_serverless_monthly": 95,
+    "rds_detail": "Aurora Serverless v2 0.5-4 ACU — solo incluir si hay BD detectada en inventario",
+    "alb_monthly": 22,
     "secrets_manager_monthly": 10,
     "cloudwatch_monthly": 25,
-    "total_monthly": 310,
-    "total_annual": 3720,
+    "ecr_monthly": 5,
+    "total_monthly": 337,
+    "total_annual": 4044,
     "migration_one_time_cost": 85000,
-    "five_year_total": 103600
+    "migration_cost_detail": "Sprint 0-3 (8 semanas): 2 devs senior + 1 DevOps × 8 semanas × tarifas mercado",
+    "five_year_total": 105220
   }},
 
   "roi": {{
-    "annual_saving": 256280,
-    "five_year_saving": 1196400,
+    "annual_saving": 280956,
+    "five_year_saving": 1319780,
     "payback_months": 4,
-    "roi_pct": 1157
+    "roi_pct": 1253,
+    "irr_5yr": "312%",
+    "npv_5yr": 980000
   }},
 
-  "c_suite_summary": "2-3 oraciones para el CEO/CTO: riesgo actual, ahorro proyectado y recomendación de acción inmediata",
+  "c_suite_summary": "3-4 oraciones ejecutivas para CEO/CTO/CFO: (1) riesgo técnico-financiero actual cuantificado con CVEs reales, (2) ahorro proyectado a 5 años con payback concreto, (3) riesgo de NO migrar (costo creciente de mantenimiento + riesgo de breach), (4) recomendación de acción inmediata con fecha sugerida de inicio",
 
   "cost_drivers": [
-    {{"driver": "CVE-2021-44228 Log4Shell sin parchear", "annual_risk_exposure": 200000,
-      "note": "costo estimado de un breach según IBM Cost of Data Breach 2023"}}
-  ]
+    {{"driver": "CVE específico del inventario o versión EoL real",
+      "annual_risk_exposure": 200000,
+      "probability": "15%",
+      "expected_loss": 30000,
+      "note": "fuente: IBM Cost of Data Breach 2024 / NVD CVSS score"}}
+  ],
+
+  "financial_assumptions": [
+    "Tarifa senior Java developer: $85/h (mercado LATAM)",
+    "Revenue impact downtime: estimado según tipo de aplicación",
+    "Tipo de cambio: USD — ajustar si inventario muestra moneda local",
+    "Breach cost base: IBM 2024 $4.88M × factor industria"
+  ],
+
+  "aws_sizing_rationale": "explicación técnica del sizing elegido: por qué esas instancias/tasks/ACU basado en el inventario — número de usuarios, clases, dependencias, carga estimada"
 }}
+
+REGLAS:
+- Si el inventario NO tiene base de datos detectada: rds_aurora_serverless_monthly = 0 y aclararlo en rds_detail.
+- Si el inventario tiene múltiples servicios/hosts: multiplicar los costos apropiadamente.
+- Los CVEs en cost_drivers deben ser los mismos que aparecen en el inventario, no genéricos.
+- Nunca inventes CVEs que no estén en el inventario — si no hay CVEs, usa versiones EoL como risk drivers.
+- c_suite_summary: idioma ejecutivo, sin jerga técnica, con números concretos.
 """
 
 # ─── Background Job (Bedrock Async — Agentic + RAG) ─────────────────────────
@@ -957,7 +1103,7 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
     )
 
     bedrock     = _bedrock_client()
-    model       = MODEL_CHAIN[0]   # Agentes usan Nova Pro primero
+    model       = MODEL_CHAIN[0]   # Agentes usan Nova Lite primero
     mid, mlabel = model["id"], model["label"]
     last_error  = None
 
@@ -1014,30 +1160,30 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
         inv_msg = f"Inventario técnico estructurado:\n\n{structured_inv}"
 
         def run_security():
-            return _call_agent(bedrock, mid, 2048,
+            return _call_agent(bedrock, mid, 3500,
                                _common_ctx + _AGENT_SECURITY_PROMPT, inv_msg)
 
         def run_migration():
             ctx = inv_msg
             if sec_result:
                 ctx += f"\n\n[SECURITY_FINDINGS — Sprint 1 mandatory tasks incluídas]\n{json.dumps(sec_result, ensure_ascii=False)[:2000]}"
-            return _call_agent(bedrock, mid, 3072,
+            return _call_agent(bedrock, mid, 4096,
                                _common_ctx + _AGENT_MIGRATION_PROMPT, ctx)
 
         def run_code():
-            return _call_agent(bedrock, mid, 2048,
+            return _call_agent(bedrock, mid, 3500,
                                _common_ctx + _AGENT_CODE_PROMPT, inv_msg)
 
         def run_java():
-            return _call_agent(bedrock, mid, 4096,
+            return _call_agent(bedrock, mid, 5000,
                                _common_ctx + _AGENT_JAVA_PROMPT, inv_msg)
 
         def run_cloudnative():
-            return _call_agent(bedrock, mid, 4096,
+            return _call_agent(bedrock, mid, 5000,
                                _common_ctx + _AGENT_CLOUDNATIVE_PROMPT, inv_msg)
 
         def run_business():
-            return _call_agent(bedrock, mid, 2048,
+            return _call_agent(bedrock, mid, 3500,
                                _common_ctx + _AGENT_BUSINESS_PROMPT, inv_msg)
 
         # Etapa 1a: Security + Code + Business en paralelo (+ Java + CloudNative si es artefacto)
@@ -1821,11 +1967,35 @@ async def export_pdf(scan_id: str, req: PdfExportRequest = None, _user: str = De
     if sprints:
         h1(pdf, "Plan de Migracion (Sprints)")
         for k, v in sprints.items():
-            if v:
-                label = k.replace("_", " ").upper()
-                tasks = "\n".join(f"  - {t}" for t in v) if isinstance(v, list) else str(v)
-                h2(pdf, label)
-                body(pdf, tasks)
+            if not v:
+                continue
+            label = k.replace("_", " ").upper()
+            h2(pdf, label)
+            items = v if isinstance(v, list) else [v]
+            for t in items:
+                # t puede ser string o dict con title/description
+                if isinstance(t, dict):
+                    title = t.get("title") or t.get("task") or t.get("name") or ""
+                    desc  = t.get("description") or t.get("desc") or ""
+                    effort = t.get("effort") or ""
+                    line = f"  • {title}"
+                    if effort:
+                        line += f" [{effort}]"
+                    pdf.set_font("Helvetica", "B", 9)
+                    pdf.set_text_color(30, 30, 80)
+                    pdf.set_x(pdf.l_margin)
+                    pdf.multi_cell(0, 5, safe(line, 180), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                    if desc:
+                        pdf.set_font("Helvetica", "", 8)
+                        pdf.set_text_color(80, 80, 80)
+                        pdf.set_x(pdf.l_margin + 6)
+                        pdf.multi_cell(0, 4, safe(desc, 250), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                else:
+                    pdf.set_font("Helvetica", "", 9)
+                    pdf.set_text_color(50, 50, 50)
+                    pdf.set_x(pdf.l_margin)
+                    pdf.multi_cell(0, 5, safe(f"  • {t}", 180), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            pdf.ln(2)
 
     # ── Remediacion de Codigo
     remeds = bp.get("code_remediation", [])
@@ -1853,6 +2023,79 @@ async def export_pdf(scan_id: str, req: PdfExportRequest = None, _user: str = De
                 pdf.cell(0, 4, safe(f"  Prioridad: {priority}  |  Esfuerzo: {effort}"), **NL)
             pdf.ln(2)
 
+    # ── Analisis Financiero (TCO / ROI)
+    biz = bp.get("business", {})
+    if biz and (biz.get("tco_legacy") or biz.get("tco_aws") or biz.get("roi_analysis")):
+        pdf.add_page()
+        h1(pdf, "Analisis Financiero — TCO y ROI")
+
+        def fmt_usd(n):
+            try:
+                return f"${int(float(n)):,}"
+            except (TypeError, ValueError):
+                return str(n) if n else "—"
+
+        leg = biz.get("tco_legacy") or {}
+        aws = biz.get("tco_aws") or {}
+        roi = biz.get("roi_analysis") or {}
+
+        if leg or aws:
+            h2(pdf, "Costo Total de Propiedad (TCO)")
+            # Encabezado tabla
+            col = [80, 45, 45]
+            pdf.set_font("Helvetica", "B", 8)
+            pdf.set_fill_color(20, 60, 120)
+            pdf.set_text_color(255, 255, 255)
+            pdf.cell(col[0], 6, "Componente", fill=True, border=1)
+            pdf.cell(col[1], 6, "Legacy (anual)", fill=True, border=1, align="R")
+            pdf.cell(col[2], 6, "AWS (mensual)", fill=True, border=1, align="R", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            rows = [
+                ("Licenciamiento / Infra",      leg.get("annual_licensing"),                  aws.get("ecs_fargate_monthly")),
+                ("Labor / Mantenimiento",        leg.get("annual_labor_maintenance"),           aws.get("rds_aurora_serverless_monthly")),
+                ("Incidentes de Seguridad",      leg.get("annual_security_incidents_risk"),     aws.get("secrets_manager_monthly")),
+                ("Downtime",                     leg.get("annual_downtime_cost"),               aws.get("cloudwatch_monthly")),
+            ]
+            for i, (lbl, l_val, a_val) in enumerate(rows):
+                if not l_val and not a_val:
+                    continue
+                bg = (240, 245, 255) if i % 2 == 0 else (255, 255, 255)
+                pdf.set_fill_color(*bg)
+                pdf.set_font("Helvetica", "", 8)
+                pdf.set_text_color(40, 40, 40)
+                pdf.cell(col[0], 5, safe(lbl), fill=True, border=1)
+                pdf.set_text_color(180, 0, 0)
+                pdf.cell(col[1], 5, fmt_usd(l_val), fill=True, border=1, align="R")
+                pdf.set_text_color(0, 130, 60)
+                pdf.cell(col[2], 5, fmt_usd(a_val), fill=True, border=1, align="R", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            # Totales
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.set_fill_color(220, 235, 255)
+            pdf.set_text_color(20, 20, 80)
+            pdf.cell(col[0], 6, "  TOTAL ANUAL / MENSUAL", fill=True, border=1)
+            pdf.set_text_color(180, 0, 0)
+            pdf.cell(col[1], 6, fmt_usd(leg.get("total_annual")), fill=True, border=1, align="R")
+            pdf.set_text_color(0, 130, 60)
+            pdf.cell(col[2], 6, fmt_usd(aws.get("total_monthly")), fill=True, border=1, align="R", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            pdf.ln(4)
+
+        if roi:
+            h2(pdf, "ROI y Payback")
+            for k, label in [("annual_savings_usd","Ahorro Anual Estimado"), ("roi_percentage_3yr","ROI a 3 anos (%)"), ("payback_months","Payback (meses)")]:
+                val = roi.get(k)
+                if val is not None:
+                    label_value(pdf, label, str(val))
+            pdf.ln(2)
+
+        csuite = biz.get("c_suite_summary") or ""
+        if csuite:
+            h2(pdf, "Resumen para C-Suite")
+            body(pdf, csuite)
+
+        risk_rat = biz.get("risk_rationale") or ""
+        if risk_rat:
+            h2(pdf, f"Riesgo Financiero: {biz.get('risk_score','—')}/10")
+            body(pdf, risk_rat)
+
     # ── Diagramas de Flujo (página nueva)
     pdf.add_page()
     h1(pdf, "Diagramas de Arquitectura")
@@ -1863,8 +2106,15 @@ async def export_pdf(scan_id: str, req: PdfExportRequest = None, _user: str = De
     pdf.add_page()
     h1(pdf, "Infrastructure as Code")
 
-    for section_label, bp_key in [("Terraform HCL", "terraform_code"), ("Kubernetes YAML", "k8s_yaml"), ("Dockerfile", "dockerfile")]:
-        content = bp.get(bp_key, "")
+    cn_data = bp.get("cloudnative", {})
+    # Fuente primaria: campos del blueprint; fallback al CloudNative agent para artefactos Java
+    iac_sections = [
+        ("Terraform HCL",   bp.get("terraform_code") or cn_data.get("terraform_managed_services", "")),
+        ("Kubernetes YAML",  bp.get("k8s_yaml")       or cn_data.get("k8s_deployment", "")),
+        ("Dockerfile",       bp.get("dockerfile")     or cn_data.get("dockerfile", "")),
+    ]
+    for section_label, content in iac_sections:
+        content = (content or "").replace("\\n", "\n")
         if content and content not in ("No disponible", ""):
             h2(pdf, section_label)
             pdf.set_font("Courier", "", 7)
@@ -1874,15 +2124,41 @@ async def export_pdf(scan_id: str, req: PdfExportRequest = None, _user: str = De
                 pdf.cell(0, 4, line[:140], fill=True, **NL)
             pdf.ln(4)
 
+    # ── CloudNative extras (healthchecks, runbooks) si existen
+    hc = cn_data.get("healthcheck_config") or {}
+    if hc:
+        h2(pdf, "Health Probes")
+        for probe, val in hc.items():
+            label_value(pdf, probe.replace("_", " ").upper(), str(val))
+
+    runbooks = cn_data.get("sre_runbook") or []
+    if runbooks:
+        h2(pdf, "Runbooks SRE Post-Deploy")
+        for rb in runbooks[:3]:
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.set_text_color(30, 80, 200)
+            pdf.cell(0, 5, safe(rb.get("title", "")), **NL)
+            if rb.get("trigger"):
+                pdf.set_font("Helvetica", "I", 8)
+                pdf.set_text_color(150, 100, 0)
+                pdf.cell(0, 4, safe("Trigger: " + rb["trigger"]), **NL)
+            for step in (rb.get("steps") or [])[:4]:
+                pdf.set_font("Helvetica", "", 8)
+                pdf.set_text_color(50, 50, 50)
+                pdf.set_x(pdf.l_margin + 4)
+                pdf.multi_cell(0, 4, safe("• " + step, 200), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            pdf.ln(2)
+
     buf = io.BytesIO()
     pdf.output(buf)
     buf.seek(0)
-    hostname_safe = re.sub(r"[^a-z0-9]", "-", d["hostname"].lower())
+    date_part  = (d.get("timestamp") or "")[:10] or datetime.now().strftime("%Y-%m-%d")
+    hostname_safe = re.sub(r"[^a-z0-9]", "-", (d["hostname"] or "server").lower())
     logger.info("PDF generado para scan %s por %s", scan_id[:8], _user)
     return Response(
         content=buf.read(),
         media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename=report_{hostname_safe}_{scan_id[:8]}.pdf"}
+        headers={"Content-Disposition": f"attachment; filename=modernization-report_{hostname_safe}_{date_part}.pdf"}
     )
 
 
@@ -1956,8 +2232,15 @@ async def export_to_jira(body: JiraExportRequest, _user: str = Depends(verify_au
 
     summary_text = bp.get("agent_analysis", "Blueprint generado por Modernization Factory.")
     sprints = bp.get("sprints", {})
+    def _sprint_task_text(t):
+        if isinstance(t, dict):
+            title = t.get("title") or t.get("task") or ""
+            effort = t.get("effort") or ""
+            owner = t.get("owner") or ""
+            return f"{title}{' ['+effort+']' if effort else ''}{' ('+owner+')' if owner else ''}"
+        return str(t)
     sprint_lines = "\n".join(
-        f"  {k.replace('_',' ').upper()}: {', '.join(v) if isinstance(v, list) else v}"
+        f"  {k.replace('_',' ').upper()}: {', '.join(_sprint_task_text(t) for t in v) if isinstance(v, list) else str(v)}"
         for k, v in sprints.items() if v
     )
     remeds = bp.get("code_remediation", [])
@@ -3455,6 +3738,630 @@ async def analyze_artifact(
         "container_size_kb": len(file_bytes) // 1024,
         "inventory_preview": inventory,
     }
+
+
+# ─── PDF Report Generator ─────────────────────────────────────────────────────
+@app.get("/report/{scan_id}")
+async def generate_pdf_report(scan_id: str, _user: str = Depends(verify_auth)):
+    """Genera un informe PDF profesional del análisis de modernización."""
+    try:
+        from fpdf import FPDF
+    except ImportError:
+        raise HTTPException(status_code=500, detail="fpdf2 no instalado. Ejecuta: pip install fpdf2")
+
+    conn, _ = _get_db()
+    row = conn.execute(
+        "SELECT hostname, timestamp, raw_inventory, bedrock_blueprint FROM scan_history WHERE id=?",
+        (scan_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Scan no encontrado")
+
+    hostname, timestamp, raw_inventory, bp_json = row
+    bp = {}
+    try:
+        bp = json.loads(bp_json or "{}")
+    except Exception:
+        pass
+
+    cn  = bp.get("cloudnative", {})
+    biz = bp.get("business", {})
+    sec = bp.get("security", {})
+    mig = bp.get("migration", {})
+    ca  = bp.get("current_architecture", {})
+    date_str = (timestamp or "")[:10]
+
+    # ── Helpers ──────────────────────────────────────────────────────────────
+    C_DARK   = (15, 20, 40)
+    C_BLUE   = (0, 163, 255)
+    C_GREEN  = (0, 230, 118)
+    C_RED    = (255, 65, 108)
+    C_YELLOW = (255, 190, 50)
+    C_LGRAY  = (230, 234, 240)
+    C_MGRAY  = (100, 110, 130)
+    C_WHITE  = (255, 255, 255)
+
+    class MFReport(FPDF):
+        def header(self):
+            if self.page_no() == 1:
+                return
+            self.set_fill_color(*C_DARK)
+            self.rect(0, 0, 210, 12, 'F')
+            self.set_font("Helvetica", "B", 7)
+            self.set_text_color(*C_BLUE)
+            self.set_xy(10, 3)
+            self.cell(0, 6, "MODERNIZATION FACTORY  |  Informe Confidencial", ln=False)
+            self.set_text_color(*C_MGRAY)
+            self.set_xy(0, 3)
+            self.cell(200, 6, hostname or "", align="R")
+            self.ln(12)
+
+        def footer(self):
+            self.set_y(-12)
+            self.set_font("Helvetica", "", 7)
+            self.set_text_color(*C_MGRAY)
+            self.cell(0, 8, f"Pagina {self.page_no()}  |  Generado {date_str}  |  Confidencial", align="C")
+
+        def section_title(self, title, color=None):
+            clr = color or C_BLUE
+            self.set_fill_color(*clr)
+            self.rect(10, self.get_y(), 3, 6, 'F')
+            self.set_xy(15, self.get_y())
+            self.set_font("Helvetica", "B", 11)
+            self.set_text_color(*C_DARK)
+            self.cell(0, 6, title, ln=True)
+            self.ln(2)
+
+        def kv_row(self, key, val, key_color=None, val_color=None):
+            kc = key_color or C_MGRAY
+            vc = val_color or C_DARK
+            self.set_font("Helvetica", "B", 8)
+            self.set_text_color(*kc)
+            self.cell(55, 5, key, ln=False)
+            self.set_font("Helvetica", "", 8)
+            self.set_text_color(*vc)
+            self.multi_cell(0, 5, str(val)[:200])
+
+        def badge(self, text, bg, fg=(255,255,255)):
+            self.set_fill_color(*bg)
+            self.set_text_color(*fg)
+            self.set_font("Helvetica", "B", 7)
+            self.cell(len(text)*2.3 + 4, 5, text, border=0, fill=True, ln=False)
+            self.set_text_color(*C_DARK)
+
+        def safe_text(self, txt):
+            """Convierte texto a latin-1 safe eliminando chars no soportados."""
+            if not txt:
+                return ""
+            return txt.encode("latin-1", errors="replace").decode("latin-1")
+
+    pdf = MFReport()
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.set_margins(10, 15, 10)
+
+    # ════════════════════════════════════════════════════════════
+    # PORTADA
+    # ════════════════════════════════════════════════════════════
+    pdf.add_page()
+    # Fondo oscuro
+    pdf.set_fill_color(*C_DARK)
+    pdf.rect(0, 0, 210, 297, 'F')
+    # Banda azul superior
+    pdf.set_fill_color(*C_BLUE)
+    pdf.rect(0, 0, 210, 4, 'F')
+    # Titulo principal
+    pdf.set_y(60)
+    pdf.set_font("Helvetica", "B", 28)
+    pdf.set_text_color(*C_WHITE)
+    pdf.cell(0, 14, "MODERNIZATION", align="C", ln=True)
+    pdf.set_font("Helvetica", "", 28)
+    pdf.set_text_color(*C_BLUE)
+    pdf.cell(0, 14, "FACTORY", align="C", ln=True)
+    pdf.ln(6)
+    pdf.set_font("Helvetica", "", 11)
+    pdf.set_text_color(*C_LGRAY)
+    pdf.cell(0, 8, "Informe de Modernizacion Cloud", align="C", ln=True)
+    # Separador
+    pdf.set_draw_color(*C_BLUE)
+    pdf.set_line_width(0.8)
+    pdf.line(40, pdf.get_y() + 4, 170, pdf.get_y() + 4)
+    pdf.ln(12)
+    # Hostname
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.set_text_color(*C_WHITE)
+    pdf.cell(0, 10, pdf.safe_text(hostname or "Servidor"), align="C", ln=True)
+    pdf.ln(4)
+    # Fecha y score
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(*C_MGRAY)
+    pdf.cell(0, 7, f"Fecha: {date_str}", align="C", ln=True)
+    coupling = ca.get("coupling_score")
+    if coupling is not None:
+        sev_clr = C_RED if coupling >= 7 else (C_YELLOW if coupling >= 4 else C_GREEN)
+        pdf.ln(8)
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.set_text_color(*sev_clr)
+        pdf.cell(0, 8, f"Score de Acoplamiento: {coupling}/10", align="C", ln=True)
+    risk = biz.get("risk_score")
+    if risk is not None:
+        pdf.set_font("Helvetica", "", 10)
+        pdf.set_text_color(*C_MGRAY)
+        pdf.cell(0, 7, f"Riesgo Financiero: {risk}/10", align="C", ln=True)
+    # Pie portada
+    pdf.set_y(260)
+    pdf.set_font("Helvetica", "", 8)
+    pdf.set_text_color(*C_MGRAY)
+    pdf.cell(0, 6, "Documento Confidencial — Solo para uso interno", align="C", ln=True)
+    pdf.cell(0, 6, "Generado por Modernization Factory v5.0 con AWS Bedrock Nova Lite", align="C", ln=True)
+
+    # ════════════════════════════════════════════════════════════
+    # PAG 2 — RESUMEN EJECUTIVO
+    # ════════════════════════════════════════════════════════════
+    pdf.add_page()
+    pdf.set_fill_color(*C_WHITE)
+    pdf.rect(0, 0, 210, 297, 'F')
+
+    pdf.section_title("1. Resumen Ejecutivo")
+    summary = bp.get("executive_summary") or bp.get("summary") or ""
+    if not summary and ca:
+        summary = ca.get("summary", "")
+    if summary:
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(*C_DARK)
+        pdf.multi_cell(0, 5, pdf.safe_text(str(summary)[:800]))
+    pdf.ln(4)
+
+    # Métricas clave en grid
+    pdf.section_title("Metricas Clave")
+    metrics = [
+        ("Acoplamiento", f"{ca.get('coupling_score','—')}/10"),
+        ("Riesgo Financiero", f"{biz.get('risk_score','—')}/10"),
+        ("CVEs Criticos", str(len([c for c in (sec.get("cves_found") or []) if c.get("severity") == "CRITICO"]))),
+        ("Estrategia Recomendada", mig.get("strategy", ca.get("strategy_recommendation", "—"))),
+        ("Target", mig.get("target_platform", "ECS Fargate / Spring Boot 3.2 + Java 21")),
+    ]
+    for k, v in metrics:
+        pdf.kv_row(k + ":", v)
+    pdf.ln(4)
+
+    # CVEs top
+    cves = sec.get("cves_found") or []
+    if cves:
+        pdf.section_title("Top CVEs Detectados", C_RED)
+        for cve in cves[:5]:
+            sev = cve.get("severity", "MEDIO")
+            bg = C_RED if sev == "CRITICO" else (C_YELLOW if sev == "ALTO" else C_MGRAY)
+            pdf.set_x(10)
+            pdf.badge(sev, bg)
+            pdf.set_font("Helvetica", "B", 8)
+            pdf.set_text_color(*C_DARK)
+            pdf.cell(30, 5, pdf.safe_text(cve.get("cve_id", "")), ln=False)
+            pdf.set_font("Helvetica", "", 8)
+            pdf.multi_cell(0, 5, pdf.safe_text(cve.get("description", "")[:120]))
+
+    # ════════════════════════════════════════════════════════════
+    # PAG 3 — PLAN DE MIGRACIÓN
+    # ════════════════════════════════════════════════════════════
+    pdf.add_page()
+    pdf.set_fill_color(*C_WHITE)
+    pdf.rect(0, 0, 210, 297, 'F')
+
+    pdf.section_title("2. Plan de Migracion — 4 Sprints")
+    sprints = mig.get("sprints") or bp.get("sprints") or {}
+    sprint_labels = [
+        ("sprint_0", "SPRINT 0 — Analisis y Seguridad",    C_RED),
+        ("sprint_1", "SPRINT 1 — Contenedores y CI/CD",    C_YELLOW),
+        ("sprint_2", "SPRINT 2 — Refactorizacion",         C_BLUE),
+        ("sprint_3", "SPRINT 3 — Corte a Cloud",           C_GREEN),
+    ]
+    for key, label, clr in sprint_labels:
+        tasks = sprints.get(key) or []
+        if not tasks:
+            continue
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_fill_color(*clr)
+        pdf.set_text_color(*C_WHITE)
+        pdf.cell(0, 6, f"  {label}", fill=True, ln=True)
+        pdf.set_text_color(*C_DARK)
+        pdf.set_font("Helvetica", "", 8)
+        for task in tasks[:8]:
+            if isinstance(task, dict):
+                title   = task.get("title") or task.get("task") or ""
+                effort  = task.get("effort") or ""
+                owner   = task.get("owner") or ""
+                desc    = task.get("description") or ""
+                header  = f"{title}{' ['+effort+']' if effort else ''}{' ('+owner+')' if owner else ''}"
+                task_text = header + (f": {desc}" if desc else "")
+            else:
+                task_text = str(task)
+            pdf.set_x(14)
+            pdf.cell(4, 5, chr(149), ln=False)
+            pdf.multi_cell(0, 5, pdf.safe_text(task_text[:200]))
+        pdf.ln(2)
+
+    blocking = mig.get("blocking_issues") or cn.get("blocking_issues") or []
+    if blocking:
+        pdf.ln(2)
+        pdf.section_title("Bloqueadores Pre-Deploy", C_RED)
+        for b in blocking[:5]:
+            sev = b.get("severity", "MEDIO")
+            bg = C_RED if sev == "CRITICO" else (C_YELLOW if sev == "ALTO" else C_MGRAY)
+            pdf.set_x(10)
+            pdf.badge(sev, bg)
+            pdf.set_font("Helvetica", "", 8)
+            pdf.set_text_color(*C_DARK)
+            pdf.multi_cell(0, 5, "  " + pdf.safe_text(b.get("issue", "")[:140]))
+
+    # ════════════════════════════════════════════════════════════
+    # PAG 4 — ARTEFACTOS IaC
+    # ════════════════════════════════════════════════════════════
+    if cn:
+        pdf.add_page()
+        pdf.set_fill_color(*C_WHITE)
+        pdf.rect(0, 0, 210, 297, 'F')
+
+        pdf.section_title("3. Artefactos Cloud-Native")
+
+        # Violations 12-Factor
+        violations = cn.get("twelve_factor_violations") or []
+        if violations:
+            pdf.section_title("Violaciones 12-Factor App", C_YELLOW)
+            for v in violations[:6]:
+                pdf.set_font("Helvetica", "B", 7)
+                pdf.set_text_color(*C_YELLOW)
+                pdf.cell(50, 4, pdf.safe_text(v.get("factor", "")[:40]), ln=False)
+                pdf.set_font("Helvetica", "", 7)
+                pdf.set_text_color(*C_DARK)
+                pdf.multi_cell(0, 4, pdf.safe_text(v.get("violation", "")[:140]))
+            pdf.ln(2)
+
+        # Dockerfile
+        df = cn.get("dockerfile", "").replace("\\n", "\n")
+        if df:
+            pdf.section_title("Dockerfile (Multi-stage Distroless)")
+            pdf.set_font("Courier", "", 6.5)
+            pdf.set_fill_color(245, 246, 250)
+            pdf.set_text_color(30, 40, 60)
+            for line in df.split("\n")[:30]:
+                pdf.set_x(10)
+                pdf.cell(0, 4, pdf.safe_text(line[:120]), fill=True, ln=True)
+            pdf.ln(2)
+
+        # Healthchecks
+        hc = cn.get("healthcheck_config") or {}
+        if hc:
+            pdf.section_title("Health Probes")
+            for k, v in hc.items():
+                pdf.kv_row(k.replace("_", " ").upper() + ":", v)
+            pdf.ln(2)
+
+        # Deployment commands
+        cmds = cn.get("deployment_commands") or []
+        if cmds:
+            pdf.section_title("Comandos de Despliegue")
+            pdf.set_font("Courier", "", 7)
+            pdf.set_text_color(*C_DARK)
+            for i, cmd in enumerate(cmds[:6], 1):
+                pdf.set_x(10)
+                pdf.cell(8, 5, f"{i}.", ln=False)
+                pdf.multi_cell(0, 5, pdf.safe_text(cmd[:140]))
+
+    # ════════════════════════════════════════════════════════════
+    # PAG 5 — TCO / ROI
+    # ════════════════════════════════════════════════════════════
+    if biz and biz.get("tco_legacy"):
+        pdf.add_page()
+        pdf.set_fill_color(*C_WHITE)
+        pdf.rect(0, 0, 210, 297, 'F')
+
+        pdf.section_title("4. Analisis Financiero — TCO y ROI")
+
+        fmt = lambda n: f"${int(n):,}" if n else "—"
+
+        # TCO Legacy vs AWS en tabla
+        leg = biz.get("tco_legacy", {})
+        aws = biz.get("tco_aws", {})
+
+        # Tabla header
+        col_w = [80, 50, 50]
+        pdf.set_fill_color(*C_DARK)
+        pdf.set_text_color(*C_WHITE)
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.cell(col_w[0], 6, "Componente", fill=True, border=1)
+        pdf.cell(col_w[1], 6, "Legacy (anual)", fill=True, border=1, align="R")
+        pdf.cell(col_w[2], 6, "AWS (mensual)", fill=True, border=1, align="R", ln=True)
+
+        rows = [
+            ("Infraestructura / Fargate",  leg.get("annual_licensing"),          aws.get("ecs_fargate_monthly")),
+            ("Base de Datos / RDS",        leg.get("annual_labor_maintenance"),  aws.get("rds_aurora_serverless_monthly")),
+            ("Seguridad / Secrets Mgr",    leg.get("annual_security_incidents_risk"), aws.get("secrets_manager_monthly")),
+            ("Monitoreo / CloudWatch",     leg.get("annual_downtime_cost"),      aws.get("cloudwatch_monthly")),
+        ]
+        pdf.set_font("Helvetica", "", 8)
+        for i, (label, l_val, a_val) in enumerate(rows):
+            bg = (245, 246, 250) if i % 2 == 0 else C_WHITE
+            pdf.set_fill_color(*bg)
+            pdf.set_text_color(*C_DARK)
+            pdf.cell(col_w[0], 5, pdf.safe_text(label), fill=True, border=1)
+            pdf.set_text_color(*C_RED)
+            pdf.cell(col_w[1], 5, fmt(l_val), fill=True, border=1, align="R")
+            pdf.set_text_color(0, 150, 80)
+            pdf.cell(col_w[2], 5, fmt(a_val), fill=True, border=1, align="R", ln=True)
+
+        pdf.ln(4)
+
+        # ROI summary
+        roi = biz.get("roi_analysis", {})
+        pdf.section_title("ROI y Payback")
+        roi_rows = [
+            ("Ahorro Anual Estimado",   roi.get("annual_savings_usd")),
+            ("ROI a 3 anos",            roi.get("roi_percentage_3yr")),
+            ("Payback (meses)",         roi.get("payback_months")),
+        ]
+        for k, v in roi_rows:
+            if v is not None:
+                pdf.kv_row(k + ":", str(v), val_color=C_GREEN)
+        pdf.ln(3)
+
+        csuite = biz.get("c_suite_summary", "")
+        if csuite:
+            pdf.section_title("Resumen para C-Suite")
+            pdf.set_font("Helvetica", "I", 8)
+            pdf.set_text_color(*C_DARK)
+            pdf.multi_cell(0, 5, pdf.safe_text(str(csuite)[:600]))
+
+    # ════════════════════════════════════════════════════════════
+    # OUTPUT
+    # ════════════════════════════════════════════════════════════
+    from io import BytesIO
+    from starlette.responses import Response
+    buf = BytesIO()
+    pdf_bytes = pdf.output()
+    safe_host = (hostname or "report").replace("/", "-").replace(" ", "_")
+    filename = f"modernization_report_{safe_host}_{date_str}.pdf"
+    return Response(
+        content=bytes(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+
+# ─── Migration Bundle Generator ───────────────────────────────────────────────
+@app.get("/migration-bundle/{scan_id}")
+async def download_migration_bundle(scan_id: str, _user: str = Depends(verify_auth)):
+    """
+    Genera un ZIP con todos los artefactos de migración listos para usar:
+    Dockerfile, docker-compose, K8s manifests, Terraform, deploy scripts, runbooks.
+    """
+    import zipfile, io as _io
+
+    conn, db_type = _get_conn()
+    if db_type == "sqlite":
+        conn.row_factory = sqlite3.Row
+    ph = _ph(db_type)
+    row = conn.execute(f"SELECT * FROM scan_history WHERE id = {ph}", (scan_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404, "Scan no encontrado")
+
+    d  = dict(row)
+    bp = json.loads(d["bedrock_blueprint"] or "{}") if isinstance(d.get("bedrock_blueprint"), str) else {}
+    cn = bp.get("cloudnative", {})
+    hostname   = d.get("hostname", "app")
+    date_str   = (d.get("timestamp") or "")[:10] or datetime.now().strftime("%Y-%m-%d")
+    app_name   = re.sub(r"[^a-z0-9]", "-", hostname.lower()).strip("-") or "app"
+
+    def fix_newlines(text: str) -> str:
+        return (text or "").replace("\\n", "\n").strip()
+
+    # ── Archivos a incluir en el ZIP ──────────────────────────────────────────
+    files: dict[str, str] = {}
+
+    # Dockerfile
+    dockerfile = fix_newlines(bp.get("dockerfile") or cn.get("dockerfile", ""))
+    if not dockerfile:
+        dockerfile = (
+            f"# Dockerfile generado por Modernization Factory\n"
+            f"FROM eclipse-temurin:21-jdk-alpine AS build\n"
+            f"WORKDIR /app\nCOPY pom.xml .\nRUN mvn dependency:go-offline -q\n"
+            f"COPY src ./src\nRUN mvn package -DskipTests -q\n\n"
+            f"FROM gcr.io/distroless/java21-debian12\n"
+            f"WORKDIR /app\nCOPY --from=build /app/target/*.war /app/app.war\n"
+            f"EXPOSE 8080\n"
+            f'ENTRYPOINT ["java","-Xmx512m","-XX:+UseContainerSupport","-XX:MaxRAMPercentage=75.0","-jar","/app/app.war"]\n'
+        )
+    files["Dockerfile"] = dockerfile
+
+    # docker-compose.yml
+    compose = fix_newlines(bp.get("docker_compose") or cn.get("docker_compose", ""))
+    if not compose:
+        compose = (
+            f"version: '3.9'\nservices:\n  app:\n    build: .\n"
+            f"    ports:\n      - '8080:8080'\n"
+            f"    environment:\n      APP_ENV: production\n"
+        )
+    files["docker-compose.yml"] = compose
+
+    # docker-compose.localstack.yml
+    localstack = fix_newlines(cn.get("localstack_compose", ""))
+    if localstack:
+        files["docker-compose.localstack.yml"] = localstack
+
+    # K8s manifests
+    k8s_deploy  = fix_newlines(bp.get("k8s_deployment")  or cn.get("k8s_deployment", ""))
+    k8s_service = fix_newlines(bp.get("k8s_service")      or cn.get("k8s_service", ""))
+    k8s_hpa     = fix_newlines(bp.get("k8s_hpa")          or cn.get("k8s_hpa", ""))
+    if k8s_deploy:
+        files["k8s/deployment.yaml"] = k8s_deploy
+    if k8s_service:
+        files["k8s/service.yaml"] = k8s_service
+    if k8s_hpa:
+        files["k8s/hpa.yaml"] = k8s_hpa
+    if k8s_deploy or k8s_service or k8s_hpa:
+        files["k8s/kustomization.yaml"] = (
+            f"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:"
+            + ("\n  - deployment.yaml" if k8s_deploy  else "")
+            + ("\n  - service.yaml"    if k8s_service else "")
+            + ("\n  - hpa.yaml"        if k8s_hpa     else "")
+            + "\n"
+        )
+
+    # Terraform
+    terraform = fix_newlines(
+        bp.get("terraform_code") or cn.get("terraform_managed_services", "")
+    )
+    if terraform:
+        files["terraform/main.tf"] = terraform
+        files["terraform/variables.tf"] = (
+            'variable "aws_region"   { type = string; default = "us-east-1" }\n'
+            'variable "ecr_repo"     { type = string; description = "ECR repository URI" }\n'
+            'variable "db_user"      { type = string; default = "appuser" }\n'
+            'variable "db_password"  { type = string; sensitive = true }\n'
+            'variable "db_secret_arn"{ type = string; default = "" }\n'
+        )
+        files["terraform/backend.tf"] = (
+            '# Configura el backend remoto (opcional)\n'
+            'terraform {\n'
+            '  # backend "s3" {\n'
+            f'  #   bucket = "{app_name}-terraform-state"\n'
+            '  #   key    = "prod/terraform.tfstate"\n'
+            '  #   region = "us-east-1"\n'
+            '  # }\n'
+            '}\n'
+        )
+
+    # Script de despliegue
+    deploy_cmds = cn.get("deployment_commands") or []
+    deploy_sh_lines = [
+        "#!/bin/bash",
+        "# deploy.sh — Script de despliegue generado por Modernization Factory",
+        f"# Host: {hostname}  |  Fecha: {date_str}",
+        "set -euo pipefail",
+        "",
+        'AWS_REGION="${AWS_REGION:-us-east-1}"',
+        'ECR_REPO="${ECR_REPO:-}"',
+        'IMAGE_TAG=$(git rev-parse --short HEAD 2>/dev/null || echo "latest")',
+        "",
+        "echo '🐳 Build imagen Docker...'",
+        f"docker build -t {app_name}:$IMAGE_TAG .",
+        "",
+    ]
+    if deploy_cmds:
+        deploy_sh_lines += ["echo '🚀 Comandos de despliegue:'"] + [f"# {c}" for c in deploy_cmds]
+    else:
+        deploy_sh_lines += [
+            "echo '📤 Push a ECR...'",
+            'aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REPO',
+            f'docker tag {app_name}:$IMAGE_TAG $ECR_REPO/{app_name}:$IMAGE_TAG',
+            f'docker push $ECR_REPO/{app_name}:$IMAGE_TAG',
+            "",
+            "echo '🌍 Aplicar Terraform...'",
+            "cd terraform && terraform init && terraform apply -auto-approve",
+            "",
+            "echo '⎈ Aplicar K8s manifests...'",
+            "kubectl apply -k k8s/",
+            f"kubectl rollout status deployment/{app_name}",
+        ]
+    deploy_sh_lines += ["", "echo '✅ Despliegue completado'"]
+    files["scripts/deploy.sh"] = "\n".join(deploy_sh_lines) + "\n"
+
+    # Healthcheck config como YAML
+    hc = cn.get("healthcheck_config") or {}
+    if hc:
+        hc_lines = ["# health-probes.yaml — Configuración de Health Probes\n"]
+        for k, v in hc.items():
+            hc_lines.append(f"{k}: {v}")
+        files["k8s/health-probes.txt"] = "\n".join(hc_lines) + "\n"
+
+    # SRE Runbooks en Markdown
+    runbooks = cn.get("sre_runbook") or []
+    if runbooks:
+        rb_md = [f"# SRE Runbooks — {hostname}\n", f"*Generado: {date_str}*\n"]
+        for rb in runbooks:
+            rb_md.append(f"\n## {rb.get('title', 'Runbook')}\n")
+            if rb.get("trigger"):
+                rb_md.append(f"**Trigger:** {rb['trigger']}\n")
+            steps = rb.get("steps") or []
+            if steps:
+                rb_md.append("\n**Pasos:**\n")
+                for i, s in enumerate(steps, 1):
+                    rb_md.append(f"{i}. {s}")
+        files["runbooks/sre-runbooks.md"] = "\n".join(rb_md) + "\n"
+
+    # Violaciones 12-Factor
+    violations = cn.get("twelve_factor_violations") or []
+    if violations:
+        viol_md = [f"# Violaciones 12-Factor App — {hostname}\n"]
+        for v in violations:
+            viol_md.append(f"\n## {v.get('factor', '')}")
+            viol_md.append(f"**Violación:** {v.get('violation', '')}")
+            if v.get("fix"):
+                viol_md.append(f"**Fix:** {v['fix']}")
+        files["docs/12-factor-violations.md"] = "\n".join(viol_md) + "\n"
+
+    # README
+    sprints = bp.get("sprints") or {}
+    mig     = bp.get("migration") or {}
+    strategy = mig.get("strategy") or bp.get("current_architecture", {}).get("strategy_recommendation", "Re-architect")
+    readme = [
+        f"# Migration Bundle — {hostname}",
+        f"",
+        f"**Generado:** {date_str}  |  **Estrategia:** {strategy}  |  **Target:** Spring Boot 3.2 + Java 21 + ECS Fargate",
+        f"",
+        f"## Contenido del Bundle",
+        f"",
+        f"| Archivo | Descripción |",
+        f"|---------|-------------|",
+        f"| `Dockerfile` | Multi-stage build con runtime distroless (sin shell, sin root) |",
+        f"| `docker-compose.yml` | Entorno local de desarrollo |",
+        f"| `docker-compose.localstack.yml` | Emulación offline de AWS con LocalStack |",
+        f"| `k8s/` | Manifests Kubernetes: Deployment, Service, HPA, Kustomization |",
+        f"| `terraform/` | VPC + ALB + ECS Fargate + RDS Aurora Serverless v2 |",
+        f"| `scripts/deploy.sh` | Script de build y despliegue automatizado |",
+        f"| `runbooks/` | Runbooks SRE para operación post-deploy |",
+        f"| `docs/` | Violaciones 12-Factor y guías de modernización |",
+        f"",
+        f"## Inicio Rápido",
+        f"",
+        f"```bash",
+        f"# 1. Probar localmente",
+        f"docker-compose up -d",
+        f"curl http://localhost:8080/actuator/health",
+        f"",
+        f"# 2. Emular AWS offline (LocalStack)",
+        f"docker-compose -f docker-compose.localstack.yml up -d",
+        f"",
+        f"# 3. Desplegar en AWS",
+        f"chmod +x scripts/deploy.sh && ./scripts/deploy.sh",
+        f"```",
+        f"",
+        f"## Plan de Migración",
+    ]
+    for k in ["sprint_0", "sprint_1", "sprint_2", "sprint_3"]:
+        tasks = sprints.get(k) or []
+        if tasks:
+            label = k.replace("_", " ").upper()
+            readme.append(f"\n### {label}")
+            for t in tasks[:6]:
+                title = t.get("title") if isinstance(t, dict) else str(t)
+                readme.append(f"- {title}")
+    readme += ["", "---", f"*Modernization Factory v5.0 — AWS Bedrock Nova Lite*"]
+    files["README.md"] = "\n".join(readme) + "\n"
+
+    # ── Empaquetar en ZIP ─────────────────────────────────────────────────────
+    zip_buf = _io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path, content in files.items():
+            zf.writestr(path, content.encode("utf-8"))
+    zip_buf.seek(0)
+
+    bundle_name = f"migration-bundle_{app_name}_{date_str}.zip"
+    logger.info("Migration bundle generado para scan %s (%d archivos) por %s", scan_id[:8], len(files), _user)
+    return Response(
+        content=zip_buf.read(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{bundle_name}"'}
+    )
 
 
 # ─── Static Frontend ──────────────────────────────────────────────────────────
