@@ -2191,6 +2191,8 @@ function _renderSre(cn) {
     if (hasContent && emptyEl) emptyEl.style.display = 'none';
 }
 
+window.updateAiFields = function(aiData, sh) {
+
     // ── Resumen Ejecutivo
     const execBox  = document.getElementById('exec-box');
     const execSum  = document.getElementById('exec-summary');
