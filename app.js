@@ -269,8 +269,13 @@ function _buildAsisMermaid(techs, findings, host) {
     // ── 2. Inventario por capa ────────────────────────────────────────────────
     const byLayer = { web:[], app:[], db:[], cache:[], msg:[], int:[], ext:[] };
 
+    // Java Runtime está embebido en cualquier AppServer (Tomcat, JBoss, WebSphere…)
+    // — no renderizar como nodo independiente si ya hay un AppServer.
+    const hasAppServer = (techs || []).some(t => t.cat === 'AppServer');
+
     (techs || []).forEach(t => {
         const key = (t.n || '').toLowerCase();
+        if (hasAppServer && t.cat === 'Runtime' && t.n === 'Java Runtime') return;
         if (seen.has(key) || !t.n) return;
         seen.add(key); addWords(t.n);
         const layer = _CAT_LAYER[t.cat] || 'app';
@@ -279,6 +284,10 @@ function _buildAsisMermaid(techs, findings, host) {
 
     (findings || []).forEach(f => {
         if (f.id === 'none') return;
+        // JDK findings son el runtime del AppServer — no renderizar como nodo AS-IS independiente
+        if (hasAppServer && f.rk === 'jdk') return;
+        // Agentes de infraestructura (backup, monitoreo OS) no son componentes de la aplicación
+        if (f.noArch) return;
         const name = (f.title || '').split(/\s[—(]/)[0].trim();
         const key  = name.toLowerCase();
         if (seen.has(key) || !name || wordsDupOf(name)) return;
@@ -458,76 +467,137 @@ function _buildTobeMermaid(techs) {
     (techs || []).forEach(t => { (by[t.cat] = by[t.cat] || []).push(t); });
 
     const safe = s => _mSafe(s);
+
+    // ── Flags de presencia ────────────────────────────────────────────────────
+    const hasWeb    = (by['Web'] || by['UX/UI'] || []).length > 0;
+    const hasInt    = (by['Integration'] || []).length > 0;
+    const hasDB     = (by['Database'] || by['Search'] || []).length > 0;
+    const hasCache  = (by['Cache'] || []).length > 0;
+    const hasMQ     = (by['Messaging'] || []).length > 0;
+    const hasAppSrv = (by['AppServer'] || []).length > 0;
+
+    // Runtime ligero → Lambda viable (Python/Node sin AppServer ni Integration)
+    const lightRuntime = !hasAppSrv && !hasInt &&
+        techs.some(t => /python|node\.?js/i.test(t.n));
+
+    // ── Compute label ─────────────────────────────────────────────────────────
+    const appTech   = (by['AppServer'] || by['Runtime'] || by['Framework'] || [{}])[0];
+    const computeLbl = appTech?.a || 'ECS Fargate + Corretto 17';
+    const computeId  = lightRuntime ? 'LAM' : 'ECS';
+
+    // ── Listas de techs por capa ──────────────────────────────────────────────
+    const dbTechs    = [...(by['Database'] || []), ...(by['Search'] || [])];
+    const cacheTechs = by['Cache']       || [];
+    const mqTechs    = by['Messaging']   || [];
+    const intTechs   = by['Integration'] || [];
+
     const lns = [
         'graph TB',
         '',
         '    classDef edge    fill:#1a2a4a,stroke:#FF9900,color:#FF9900',
         '    classDef compute fill:#0d2b1a,stroke:#27ae60,color:#9ae6b4',
+        '    classDef lambda  fill:#1a3a1a,stroke:#52c41a,color:#b7eb8f',
         '    classDef data    fill:#0d1a3a,stroke:#2980b9,color:#90cdf4',
         '    classDef observe fill:#2a1a4a,stroke:#8e44ad,color:#d6bcfa',
         '    classDef sec     fill:#3d1a00,stroke:#e67e22,color:#fbd38d',
         '',
-        '    INT(["🌐 Internet"]):::edge',
+        '    USR(["🌐 Internet / Usuarios"]):::edge',
         '',
-        '    subgraph EDGE["🛡️ Edge / Seguridad"]',
-        '    direction LR',
-        '        CF["CloudFront CDN"]:::edge',
-        '        WAF["AWS WAF + Shield"]:::sec',
-        '        ALB["Application LB"]:::edge',
-        '    end',
-        '',
-        '    subgraph COMPUTE["⚙️ Compute"]',
-        '    direction TB',
     ];
 
-    const appTarget = (by['AppServer'] || by['Runtime'] || [{}])[0]?.a || 'ECS Fargate';
-    lns.push(`        ECS["${safe(appTarget)}"]:::compute`);
+    // ── EDGE — CloudFront solo si hay capa Web detectada ─────────────────────
+    lns.push('    subgraph EDGE["🛡️ Edge / Seguridad"]');
+    lns.push('    direction LR');
+    if (hasWeb) lns.push('        CF["CloudFront CDN"]:::edge');
+    lns.push('        WAF["AWS WAF + Shield"]:::sec');
+    lns.push('        ALB["Application LB"]:::edge');
+    lns.push('    end');
+    lns.push('');
 
-    (by['Integration'] || []).forEach((t, i) =>
-        lns.push(`        INT${i}["${safe(t.a || 'API Gateway')}"]:::compute`)
+    // ── COMPUTE ───────────────────────────────────────────────────────────────
+    lns.push('    subgraph COMPUTE["⚙️ Compute"]');
+    lns.push('    direction TB');
+
+    if (lightRuntime) {
+        lns.push(`        LAM["${safe(computeLbl)}"]:::lambda`);
+    } else {
+        lns.push(`        ECS["${safe(computeLbl)}"]:::compute`);
+    }
+
+    // API Gateway solo si no hay Integration middleware
+    if (!hasInt) {
+        lns.push('        APIGW["API Gateway"]:::edge');
+    }
+
+    // Integration middleware → sus targets específicos
+    intTechs.forEach((t, i) =>
+        lns.push(`        INT${i}["${safe(t.a || 'Step Functions + EventBridge')}"]:::compute`)
     );
-    if (!by['Integration']?.length)
-        lns.push('        APIGW["API Gateway"]:::compute');
+
+    // Secrets Manager: siempre presente (toda app migrada debe externalizar config)
+    lns.push('        SM["Secrets Manager"]:::sec');
 
     lns.push('    end');
     lns.push('');
+
+    // ── DATA — solo nodos realmente detectados ────────────────────────────────
     lns.push('    subgraph DATA["🗄️ Data"]');
     lns.push('    direction TB');
 
-    (by['Database'] || []).forEach((t, i) =>
-        lns.push(`        RDS${i}[("${safe(t.a || 'Aurora RDS')}")]:::data`)
-    );
-    (by['Cache'] || []).forEach((t, i) =>
+    if (hasDB) {
+        dbTechs.forEach((t, i) =>
+            lns.push(`        DB${i}[("${safe(t.a || 'Aurora Serverless v2')}")]:::data`)
+        );
+    } else {
+        // Sin BD detectada: default mínimo
+        lns.push('        DB0[("Aurora Serverless v2")]:::data');
+    }
+
+    cacheTechs.forEach((t, i) =>
         lns.push(`        CC${i}["${safe(t.a || 'ElastiCache Redis')}"]:::data`)
     );
-    (by['Messaging'] || []).forEach((t, i) =>
-        lns.push(`        MQ${i}["${safe(t.a || 'Amazon MQ')}"]:::data`)
+
+    mqTechs.forEach((t, i) =>
+        lns.push(`        MQ${i}["${safe(t.a || 'Amazon SQS')}"]:::data`)
     );
-    if (!by['Database']?.length)
-        lns.push('        RDS0[("Aurora Serverless")]:::data');
+
     lns.push('        S3["Amazon S3"]:::data');
     lns.push('    end');
     lns.push('');
+
+    // ── OBSERVE ───────────────────────────────────────────────────────────────
     lns.push('    subgraph OBSERVE["📡 Observabilidad"]');
     lns.push('    direction LR');
-    lns.push('        CW["CloudWatch\nLogs + Metrics"]:::observe');
-    lns.push('        XRAY["AWS X-Ray\nTracing"]:::observe');
-    lns.push('        SEC["Security Hub\n+ GuardDuty"]:::sec');
+    lns.push('        CW["CloudWatch Logs + Metrics"]:::observe');
+    lns.push('        XRAY["AWS X-Ray Tracing"]:::observe');
+    lns.push('        SEC["Security Hub + GuardDuty"]:::sec');
     lns.push('    end');
     lns.push('');
 
-    // Connections
-    lns.push('    INT --> CF --> WAF --> ALB --> ECS');
-    (by['Integration'] || []).forEach((_, i) => lns.push(`    ECS --> INT${i}`));
-    if (!by['Integration']?.length) lns.push('    ECS --> APIGW');
-    (by['Database']  || []).forEach((_, i) => lns.push(`    ECS --> RDS${i}`));
-    (by['Cache']     || []).forEach((_, i) => lns.push(`    ECS --> CC${i}`));
-    (by['Messaging'] || []).forEach((_, i) => lns.push(`    ECS --> MQ${i}`));
-    if (!by['Database']?.length) lns.push('    ECS --> RDS0');
-    lns.push('    ECS --> S3');
-    lns.push('    ECS -.->|"logs/metrics"| CW');
-    lns.push('    ECS -.->|"traces"| XRAY');
-    lns.push('    ECS -.->|"events"| SEC');
+    // ── Conexiones ────────────────────────────────────────────────────────────
+    if (hasWeb) {
+        lns.push(`    USR --> CF --> WAF --> ALB --> ${computeId}`);
+    } else {
+        lns.push(`    USR --> WAF --> ALB --> ${computeId}`);
+    }
+
+    if (!hasInt) {
+        lns.push(`    ${computeId} --> APIGW`);
+    } else {
+        intTechs.forEach((_, i) => lns.push(`    ${computeId} --> INT${i}`));
+    }
+
+    lns.push(`    ${computeId} -.->|"config"| SM`);
+
+    const dbIds = hasDB ? dbTechs.map((_, i) => `DB${i}`) : ['DB0'];
+    dbIds.forEach(id    => lns.push(`    ${computeId} --> ${id}`));
+    cacheTechs.forEach((_, i) => lns.push(`    ${computeId} --> CC${i}`));
+    mqTechs.forEach   ((_, i) => lns.push(`    ${computeId} -.->|"async"| MQ${i}`));
+
+    lns.push(`    ${computeId} --> S3`);
+    lns.push(`    ${computeId} -.->|"logs/metrics"| CW`);
+    lns.push(`    ${computeId} -.->|"traces"| XRAY`);
+    lns.push(`    ${computeId} -.->|"events"| SEC`);
 
     return lns.join('\n');
 }
@@ -825,11 +895,12 @@ window.triggerMermaid = async function() {
     if (typeof mermaid === 'undefined') return;
 
     // Diagramas generados desde código (garantizados válidos) como fuente primaria.
-    // El diagrama de la IA se intenta primero; si falla, se usa el generado.
+    // TO-BE: siempre el generado (adaptado al stack detectado).
+    // El mermaid_infra de la IA es un template genérico — se ignora.
     const DIAGRAMS = [
         {
             id: 'im',
-            primary:  () => lastAiData?.mermaid_infra,
+            primary:  () => _buildTobeMermaid(lastDetectedTechs),
             fallback: () => _buildTobeMermaid(lastDetectedTechs),
         },
         {
@@ -883,27 +954,35 @@ async function _renderMermaid(el, aiRaw, generated) {
 }
 
 window.sw = function(i) {
+  // Hide all numeric pages p0-p5
   for(let j=0; j<6; j++) {
       let pg = document.getElementById('p'+j);
       let t = document.getElementById('n'+j);
       if(pg) pg.style.display='none';
       if(t) t.classList.remove('on');
   }
-  // also hide/deactivate lab page
-  const labPg = document.getElementById('p-lab');
-  const labNv = document.getElementById('n-lab');
-  if(labPg) labPg.style.display='none';
-  if(labNv) labNv.classList.remove('on');
+  // Hide special pages
+  ['p-lab','p-sre','p-finops'].forEach(id => {
+      const el = document.getElementById(id);
+      if(el) el.style.display='none';
+  });
+  ['n-lab','n-sre','n-finops'].forEach(id => {
+      const el = document.getElementById(id);
+      if(el) el.classList.remove('on');
+  });
 
-  const pageId = i === 'lab' ? 'p-lab' : 'p'+i;
-  const navId  = i === 'lab' ? 'n-lab' : 'n'+i;
-  let p=document.getElementById(pageId);
-  let n=document.getElementById(navId);
+  const specialMap = { lab: 'p-lab', sre: 'p-sre', finops: 'p-finops' };
+  const pageId = specialMap[i] !== undefined ? specialMap[i] : 'p'+i;
+  const navId  = (i === 'lab' || i === 'sre' || i === 'finops') ? 'n-'+i : 'n'+i;
+
+  let p = document.getElementById(pageId);
+  let n = document.getElementById(navId);
   if(p) p.style.display='block';
   if(n) n.classList.add('on');
 
   if(i === 4 && window.fetchHistory) window.fetchHistory();
   if(i === 5 && window.loadDashboard) { window.loadDashboard(); window.loadPortfolio(); }
+  if(i === 'finops' && typeof loadFinOps === 'function' && window.lastScanId) loadFinOps();
 
   if (i === 0 || i === 1 || i === 2) {
       setTimeout(() => window.triggerMermaid(), 50);
@@ -912,36 +991,41 @@ window.sw = function(i) {
       _renderIaC(lastDetectedTechs, lastHost);
       setTimeout(() => {
           const el = document.getElementById('cn-tobe-diagram');
-          if (el && el.innerText.trim() && window.mermaid) {
-              try { el.removeAttribute('data-processed'); window.mermaid.init(undefined, el); } catch(e) {}
-          }
+          if (el && el.textContent.trim()) window.triggerMermaid();
       }, 100);
   }
 };
 
-window.exportReport = function() {
-  const hostName = document.getElementById('hdrHost').innerText.split(' — ')[0].replace('📍 ','');
-  const titleEl = document.createElement('div');
-  titleEl.style.cssText = 'position:absolute;top:-9999px;font-size:1.5rem;font-weight:700;margin-bottom:1rem;border-bottom:2px solid #ccc;padding:1rem 0;';
-  titleEl.innerHTML = 'Modernization Report: <b>' + hostName + '</b>';
-  document.body.insertBefore(titleEl, document.body.firstChild);
-  
-  const ids = ['p0','p1','p2','p3'];
-  const prev = [];
-  ids.forEach(id => {
-      const el = document.getElementById(id);
-      prev.push(el.style.display);
-      el.style.display = 'block';
-  });
-  
-  window.print();
-  
-  setTimeout(() => {
-      titleEl.remove();
-      ids.forEach((id, i) => {
-          document.getElementById(id).style.display = prev[i];
-      });
-  }, 500);
+window.exportReport = async function() {
+  if (!lastScanId) { alert('Ejecuta un analisis primero para generar el informe.'); return; }
+  const btn = document.getElementById('pdf-btn');
+  const origText = btn ? btn.innerText : '';
+  if (btn) { btn.innerText = '⏳ Generando PDF...'; btn.disabled = true; }
+
+  try {
+      const apiUrl = window.API_URL || 'http://localhost:8000';
+      const r = await fetch(`${apiUrl}/report/${lastScanId}`, { headers: authHeaders() });
+      if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          throw new Error(err.detail || `Error ${r.status}`);
+      }
+      const blob = await r.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      // Extraer nombre de archivo del header si existe
+      const disp = r.headers.get('Content-Disposition') || '';
+      const match = disp.match(/filename="([^"]+)"/);
+      a.download = match ? match[1] : `modernization_report_${lastScanId}.pdf`;
+      a.href = url;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+  } catch(e) {
+      alert('Error generando PDF: ' + e.message);
+  } finally {
+      if (btn) { btn.innerText = origText; btn.disabled = false; }
+  }
 };
 
 window.setMode = function(m) {
@@ -954,26 +1038,58 @@ window.setMode = function(m) {
 };
 
 // ─── Apps Detected Modal ──────────────────────────────────────────────────────
+// ─── Apps Detected Modal — anti-FP: patrones exigen versión numérica o keyword de proceso ──
+// PRINCIPIO: no matchear una sola palabra genérica (ej:"oracle","apache") en texto libre.
+// Cada regex busca: (a) nombre + número de versión, O (b) señal de proceso específica.
 const _APP_PATTERNS = [
-    { key: 'tomcat',      label: 'Apache Tomcat',    icon: '🐱', regex: /tomcat[\s\/\-]*([\d.]+)/i },
-    { key: 'jboss',       label: 'JBoss / WildFly',  icon: '🔴', regex: /(?:jboss|wildfly)[\s\/\-]*([\d.]+)/i },
-    { key: 'weblogic',    label: 'WebLogic',          icon: '🔷', regex: /weblogic[\s\/\-]*([\d.]+)/i },
-    { key: 'websphere',   label: 'WebSphere',         icon: '🔵', regex: /websphere[\s\/\-]*([\d.]+)/i },
-    { key: 'glassfish',   label: 'GlassFish / Payara',icon: '🐟', regex: /(?:glassfish|payara)[\s\/\-]*([\d.]+)/i },
-    { key: 'spring',      label: 'Spring Boot',       icon: '🌿', regex: /spring[\-\s]boot[\s\/\-]*([\d.]+)?/i },
-    { key: 'oracle',      label: 'Oracle DB',         icon: '🗄️', regex: /oracle[\s\/\-]*([\d.]+)/i },
-    { key: 'mysql',       label: 'MySQL',             icon: '🐬', regex: /mysql[\s\/\-]*([\d.]+)/i },
-    { key: 'postgres',    label: 'PostgreSQL',        icon: '🐘', regex: /postgres(?:ql)?[\s\/\-]*([\d.]+)/i },
-    { key: 'nginx',       label: 'Nginx',             icon: '🟩', regex: /nginx[\s\/\-]*([\d.]+)/i },
-    { key: 'apache',      label: 'Apache HTTPD',      icon: '🪶', regex: /apache[\s\/\-]*([\d.]+)/i },
-    { key: 'iis',         label: 'IIS',               icon: '🪟', regex: /iis[\s\/\-]*([\d.]+)?/i },
-    { key: 'nifi',        label: 'Apache NiFi',       icon: '🌊', regex: /nifi[\s\/\-]*([\d.]+)/i },
-    { key: 'kafka',       label: 'Kafka',             icon: '📨', regex: /kafka[\s\/\-]*([\d.]+)/i },
-    { key: 'redis',       label: 'Redis',             icon: '🔴', regex: /redis[\s\/\-]*([\d.]+)/i },
-    { key: 'nodejs',      label: 'Node.js',           icon: '🟢', regex: /node[\s\/\-]*(v?[\d.]+)/i },
-    { key: 'python',      label: 'Python / Django',   icon: '🐍', regex: /python[\s\/\-]*([\d.]+)/i },
-    { key: 'dotnet',      label: '.NET / ASP.NET',    icon: '💜', regex: /(?:\.net|aspnet)[\s\/\-]*([\d.]+)?/i },
-    { key: 'osb',         label: 'Oracle Service Bus', icon: '🚌', regex: /oracle service bus|osb[\s\/\-]*([\d.]+)?/i },
+    // App servers: requieren señal de instalación real (JBOSS_HOME: /ruta) o proceso activo
+    // NO matchear versiones en rutas (/opt/jboss-5.1.0.GA) ni classpath (jboss-ejb3-api.jar)
+    { key: 'tomcat',    label: 'Apache Tomcat',     icon: '🐱',
+      // TOMCAT_HOME: /ruta (no vacío) O versión en server header
+      regex: /TOMCAT_HOME:\s*\/|Apache\s+Tomcat\/([\d.]+)|Tomcat\/([\d.]+)\s+\(Apache/i },
+    { key: 'jboss',     label: 'JBoss / WildFly',   icon: '🔴',
+      // JBOSS_HOME: /ruta (no vacío) O JBOSS_DETECTED > 0 O startup log con versión
+      regex: /JBOSS_HOME:\s*\/|JBOSS_DETECTED:\s*[1-9]|(?:JBoss|WildFly)\s+(\d+\.\d[\d.]*)\s+[\w.]*\s*[Ss]tarted/i },
+    { key: 'weblogic',  label: 'WebLogic',           icon: '🔷',
+      regex: /WebLogic\s+Server\s+([\d.]+)|weblogic\.version\s*=/i },
+    { key: 'websphere', label: 'WebSphere',          icon: '🔵',
+      regex: /WEBSPHERE_DETECTED:\s*[1-9]|WebSphere\s+Application\s+Server\s+([\d.]+)/i },
+    { key: 'glassfish', label: 'GlassFish / Payara', icon: '🐟',
+      regex: /(?:glassfish|payara)\s+([\d.]+)|GlassFish.*started/i },
+    // Frameworks: requieren versión en salida de build/start O en pom.xml/package.json
+    { key: 'spring',    label: 'Spring Boot',        icon: '🌿',
+      regex: /spring-boot\s+([\d.]+)|Spring Boot v([\d.]+)|spring-boot-starter.*version/i },
+    // DBs: requieren proceso activo o salida de --version
+    { key: 'oracle',    label: 'Oracle DB',          icon: '🗄️',
+      regex: /\bora_pmon_\w+|\btnslsnr\b|Oracle Database.*Release\s+([\d.]+)/i },
+    { key: 'mysql',     label: 'MySQL',              icon: '🐬',
+      regex: /\bmysqld\b.*running|mysql\s+Ver\s+([\d.]+)|MariaDB\s+([\d.]+)/i },
+    { key: 'postgres',  label: 'PostgreSQL',         icon: '🐘',
+      regex: /postmaster\.pid|PostgreSQL\s+([\d.]+)|pg_ctl.*status.*running/i },
+    // Web servers: requieren versión explícita en server header o -v output
+    { key: 'nginx',     label: 'Nginx',              icon: '🟩',
+      regex: /nginx\/([\d.]+)|nginx\s+version:\s+nginx\/([\d.]+)/i },
+    { key: 'apache',    label: 'Apache HTTPD',       icon: '🪶',
+      regex: /Apache\/([\d.]+)\s+\(|Server version:\s+Apache\/([\d.]+)/i },
+    { key: 'iis',       label: 'IIS',                icon: '🪟',
+      regex: /IIS\s+([\d.]+)|Internet Information Services\s+([\d.]+)/i },
+    // Integración: proceso activo o versión
+    { key: 'nifi',      label: 'Apache NiFi',        icon: '🌊',
+      regex: /\bRunNiFi\b|nifi-app\.jar|NiFi\s+([\d.]+)\s+running/i },
+    { key: 'kafka',     label: 'Kafka',              icon: '📨',
+      regex: /\[KafkaServer\s+id=|kafka\.server\.KafkaServer|kafka_([\d.]+)/i },
+    { key: 'redis',     label: 'Redis',              icon: '🔴',
+      regex: /redis-server\s+([\d.]+)|Redis\s+version=([\d.]+)/i },
+    // Runtimes: requieren salida de -version
+    { key: 'nodejs',    label: 'Node.js',            icon: '🟢',
+      regex: /\bnode\s+v([\d.]+)|\bnodejs\s+v([\d.]+)/i },
+    { key: 'python',    label: 'Python',             icon: '🐍',
+      regex: /\bPython\s+([\d]+\.[\d.]+)/i },
+    { key: 'dotnet',    label: '.NET / ASP.NET',     icon: '💜',
+      regex: /\.NET(?:\s+Core)?\s+([\d.]+)|ASP\.NET\s+([\d.]+)/i },
+    { key: 'osb',       label: 'Oracle Service Bus', icon: '🚌',
+      // SB_HOME\s*= eliminado: es env var que puede estar configurada sin OSB activo
+      regex: /ALSBConfigMBean|Oracle\s+Service\s+Bus\s+([\d.]+)/i },
 ];
 
 function _detectApps(inventoryText) {
@@ -1571,8 +1687,14 @@ function _renderLocalUI(data) {
         </div>`;
     }).join('');
 
+    // Java Runtime es el JVM del AppServer — no mostrarlo como componente independiente
+    const hasAS = data.detectedTechs.some(d => d.cat === 'AppServer');
+    const visibleTechs = data.detectedTechs.filter(d =>
+        !(hasAS && d.cat === 'Runtime' && d.n === 'Java Runtime')
+    );
+
     let bizCats = {};
-    data.detectedTechs.forEach(d => {
+    visibleTechs.forEach(d => {
         if(!bizCats[d.cat]) bizCats[d.cat] = [];
         bizCats[d.cat].push(d);
     });
@@ -1589,10 +1711,12 @@ function _renderLocalUI(data) {
     }).join('');
 
     const protoRows = [];
-    data.detectedTechs.forEach(t => protoRows.push({ icon: t.icon || '→', legacy: t.n, modern: t.a }));
+    visibleTechs.forEach(t => protoRows.push({ icon: t.icon || '→', legacy: t.n, modern: t.a }));
     const seenLegacy = new Set(protoRows.map(r => r.legacy.toLowerCase()));
     data.findings.forEach(f => {
         if (f.modern && f.modern !== 'OK' && !seenLegacy.has(f.title.toLowerCase())) {
+            // JDK runtime es interno al AppServer — no listar como ruta de migración separada
+            if (hasAS && f.rk === 'jdk') return;
             protoRows.push({ icon: '⚠', legacy: f.title, modern: f.modern });
             seenLegacy.add(f.title.toLowerCase());
         }
@@ -1918,14 +2042,20 @@ function _renderBusiness(biz) {
     const legEl = document.getElementById('cn-tco-legacy');
     if (legEl && biz.tco_legacy) {
         const l = biz.tco_legacy;
-        legEl.innerHTML = [
-            ['Licenciamiento', l.annual_licensing],
-            ['Labor/Mantenimiento', l.annual_labor_maintenance],
-            ['Riesgo Incidentes Seg.', l.annual_security_incidents_risk],
-            ['Downtime', l.annual_downtime_cost],
-        ].map(([k, v]) => `<div style="display:flex;justify-content:space-between;padding:.2rem 0;font-size:.73rem;border-bottom:1px solid rgba(255,255,255,.04)">
-            <span style="color:var(--t2)">${k}</span><span style="color:var(--red)">${fmt(v)}</span>
-        </div>`).join('') +
+        const legRows = [
+            ['Licenciamiento', l.annual_licensing, l.annual_licensing_detail],
+            ['Labor/Mantenimiento', l.annual_labor_maintenance, l.annual_labor_detail],
+            ['Riesgo Incidentes Seg.', l.annual_security_incidents_risk, l.annual_security_detail],
+            ['Downtime', l.annual_downtime_cost, l.annual_downtime_detail],
+            ['Riesgo Compliance', l.annual_compliance_risk, l.annual_compliance_detail],
+        ].filter(([, v]) => v != null && v !== 0);
+        legEl.innerHTML = legRows.map(([k, v, detail]) => `
+            <div style="padding:.25rem 0;border-bottom:1px solid rgba(255,255,255,.04)">
+                <div style="display:flex;justify-content:space-between;font-size:.73rem">
+                    <span style="color:var(--t2)">${k}</span><span style="color:var(--red)">${fmt(v)}</span>
+                </div>
+                ${detail ? `<div style="font-size:.65rem;opacity:.55;line-height:1.3;margin-top:.1rem">${detail}</div>` : ''}
+            </div>`).join('') +
         `<div style="display:flex;justify-content:space-between;padding:.3rem 0;font-size:.8rem;font-weight:700">
             <span>Total Anual</span><span style="color:var(--red)">${fmt(l.total_annual)}</span>
         </div>
@@ -1938,23 +2068,32 @@ function _renderBusiness(biz) {
     const awsEl = document.getElementById('cn-tco-aws');
     if (awsEl && biz.tco_aws) {
         const a = biz.tco_aws;
-        awsEl.innerHTML = [
-            ['ECS Fargate/mes', a.ecs_fargate_monthly],
-            ['RDS Aurora Serverless/mes', a.rds_aurora_serverless_monthly],
-            ['Secrets Manager/mes', a.secrets_manager_monthly],
-            ['CloudWatch/mes', a.cloudwatch_monthly],
-        ].map(([k, v]) => `<div style="display:flex;justify-content:space-between;padding:.2rem 0;font-size:.73rem;border-bottom:1px solid rgba(255,255,255,.04)">
-            <span style="color:var(--t2)">${k}</span><span style="color:var(--green)">${fmt(v)}</span>
-        </div>`).join('') +
+        const awsRows = [
+            ['ECS Fargate/mes', a.ecs_fargate_monthly, a.ecs_fargate_detail],
+            ['RDS Aurora Serverless/mes', a.rds_aurora_serverless_monthly, a.rds_detail],
+            ['ALB/mes', a.alb_monthly, null],
+            ['Secrets Manager/mes', a.secrets_manager_monthly, null],
+            ['CloudWatch/mes', a.cloudwatch_monthly, null],
+            ['ECR/mes', a.ecr_monthly, null],
+        ].filter(([, v]) => v != null && v !== 0);
+        awsEl.innerHTML = awsRows.map(([k, v, detail]) => `
+            <div style="padding:.25rem 0;border-bottom:1px solid rgba(255,255,255,.04)">
+                <div style="display:flex;justify-content:space-between;font-size:.73rem">
+                    <span style="color:var(--t2)">${k}</span><span style="color:var(--green)">${fmt(v)}</span>
+                </div>
+                ${detail ? `<div style="font-size:.65rem;opacity:.55;line-height:1.3;margin-top:.1rem">${detail}</div>` : ''}
+            </div>`).join('') +
         `<div style="display:flex;justify-content:space-between;padding:.3rem 0;font-size:.8rem;font-weight:700">
             <span>Total Anual</span><span style="color:var(--green)">${fmt(a.total_annual)}</span>
         </div>
         <div style="display:flex;justify-content:space-between;padding:.2rem 0;font-size:.72rem">
             <span style="color:var(--t2)">Migración (único)</span><span style="color:var(--yellow)">${fmt(a.migration_one_time_cost)}</span>
         </div>
+        ${a.migration_cost_detail ? `<div style="font-size:.65rem;opacity:.5;margin:.1rem 0 .3rem">${a.migration_cost_detail}</div>` : ''}
         <div style="display:flex;justify-content:space-between;padding:.2rem 0;font-size:.72rem">
             <span style="color:var(--t2)">Total 5 años</span><span style="color:var(--green)">${fmt(a.five_year_total)}</span>
-        </div>`;
+        </div>
+        ${biz.aws_sizing_rationale ? `<div style="font-size:.65rem;opacity:.5;margin-top:.4rem;line-height:1.4;font-style:italic">${biz.aws_sizing_rationale}</div>` : ''}`;
     }
 
     // ROI
@@ -1966,6 +2105,8 @@ function _renderBusiness(biz) {
             { label: 'Ahorro 5 años',   val: fmt(r.five_year_saving), color: 'var(--green)' },
             { label: 'Payback',         val: r.payback_months ? r.payback_months + ' meses' : '—', color: 'var(--blue)' },
             { label: 'ROI',             val: r.roi_pct ? r.roi_pct + '%' : '—', color: 'var(--yellow)' },
+            { label: 'TIR 5 años',      val: r.irr_5yr || '—', color: '#a78bfa' },
+            { label: 'VAN 5 años',      val: r.npv_5yr ? fmt(r.npv_5yr) : '—', color: '#a78bfa' },
         ].map(({ label, val, color }) => `
             <div style="text-align:center">
                 <div style="font-size:1.1rem;font-weight:700;color:${color}">${val}</div>
@@ -1973,12 +2114,23 @@ function _renderBusiness(biz) {
             </div>`).join('');
     }
 
+    // Financial Assumptions
+    if (biz.financial_assumptions?.length) {
+        const fa = biz.financial_assumptions;
+        const faEl = document.getElementById('cn-business-box');
+        const existingFa = faEl?.querySelector('.fin-assumptions');
+        if (faEl && !existingFa) {
+            const div = document.createElement('div');
+            div.className = 'fin-assumptions';
+            div.style.cssText = 'margin-top:.8rem;padding:.6rem;background:rgba(255,255,255,.03);border-radius:8px;font-size:.68rem;color:var(--t2)';
+            div.innerHTML = `<div style="font-weight:600;margin-bottom:.3rem;color:var(--t1)">Supuestos Financieros</div>` +
+                fa.map(a => `<div style="padding:.1rem 0">• ${a}</div>`).join('');
+            faEl.appendChild(div);
+        }
+    }
+
     box.style.display = 'block';
 }
-
-window.updateAiFields = function(aiData, sh) {
-    lastAiData = aiData;
-    lastSh = sh;
 
     // ── Resumen Ejecutivo
     const execBox  = document.getElementById('exec-box');
@@ -1988,7 +2140,7 @@ window.updateAiFields = function(aiData, sh) {
         execBox.style.display = 'block';
     }
 
-    // ── Estrategia de Migración
+    // ── Estrategia de Migración (Pilar 1 - Architect)
     const strat = aiData?.migration_strategy;
     const stratBox = document.getElementById('strategy-box');
     if (strat && stratBox) {
@@ -1997,243 +2149,261 @@ window.updateAiFields = function(aiData, sh) {
         const timeline = document.getElementById('strategy-timeline');
         if (badge) badge.innerText = (strat.approach || '').toUpperCase();
         if (rationale) rationale.innerText = strat.rationale || '';
-        if (timeline) timeline.innerText = strat.total_weeks ? `${strat.total_weeks} semanas · ${strat.phases || 4} fases` : '';
+        if (timeline) timeline.innerText = strat.total_weeks ? `${strat.total_weeks} semanas · ${strat.phases || 4} fases · ${strat.target_runtime || 'ECS Fargate'}` : '';
         stratBox.style.display = 'block';
     }
 
-    // ── Quick Wins
-    const qwBox  = document.getElementById('qw-box');
-    const qwList = document.getElementById('qw-list');
-    if (aiData?.quick_wins?.length && qwBox && qwList) {
-        qwList.innerHTML = aiData.quick_wins.map(q => `
-            <div style="background:rgba(0,176,155,.06);border:1px solid rgba(0,176,155,.25);border-radius:10px;padding:.7rem 1rem;margin-bottom:.5rem">
-                <div style="display:flex;align-items:center;gap:.6rem;margin-bottom:.3rem;flex-wrap:wrap">
-                    <span style="font-weight:700;font-size:.82rem">${q.title || ''}</span>
-                    <span style="font-size:.65rem;color:var(--t2);background:rgba(0,0,0,.3);padding:.15rem .5rem;border-radius:10px">${q.effort || ''}</span>
-                    <span style="font-size:.65rem;color:var(--blue);margin-left:auto">${q.owner || ''}</span>
-                </div>
-                <div style="font-size:.75rem;color:var(--t2);margin-bottom:.2rem">${q.description || ''}</div>
-                ${q.risk_reduction ? `<div style="font-size:.7rem;color:var(--green)">▸ ${q.risk_reduction}</div>` : ''}
-            </div>`).join('');
-        qwBox.style.display = 'block';
-    }
+    // ── Sprints Plan (Pilar 1 - Architect)
+    const sp0 = aiData?.sprints?.sprint_0 || [];
+    const sp1 = aiData?.sprints?.sprint_1 || [];
+    const sp2 = aiData?.sprints?.sprint_2 || [];
+    const sp3 = aiData?.sprints?.sprint_3 || [];
+    document.getElementById('plan').innerHTML = spB('SPRINT 0', sp0) + spB('SPRINT 1', sp1) + spB('SPRINT 2', sp2) + spB('SPRINT 3', sp3);
 
-    // ── Sprints
-    let sp0 = (aiData?.sprints) ? aiData.sprints.sprint_0 : ['Inventario EOL', 'Mapeo APIs', 'Seguridad'];
-    let sp1 = (aiData?.sprints) ? aiData.sprints.sprint_1 : ['Containerización', 'CI/CD'];
-    let sp2 = (aiData?.sprints) ? aiData.sprints.sprint_2 : ['Refactorización', 'Migración'];
-    let sp3 = (aiData?.sprints) ? aiData.sprints.sprint_3 : ['Corte Cloud', 'Optimización'];
-
-    document.getElementById('plan').innerHTML = spB('SPRINT 0 — Análisis y Seguridad', sp0) + spB('SPRINT 1 — Contenedores y CI/CD', sp1) + spB('SPRINT 2 — Refactorización', sp2) + spB('SPRINT 3 — Corte a Cloud', sp3);
-
-    // SRE Steps in p1
-    const sreList = document.getElementById('sre');
-    if (sreList) {
-        sreList.innerHTML = sp0.map(s => `<li style="padding:.25rem 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:.78rem">${s}</li>`).join('');
-    }
-
-    // ── Análisis Detallado de Agentes
-    const agentBox     = document.getElementById('agent-box');
-    const agentSummary = document.getElementById('agent-summary');
-    if (aiData?.agent_analysis && agentBox && agentSummary) {
-        agentSummary.innerText = aiData.agent_analysis;
-        agentBox.style.display = 'block';
-    }
-
-    // ── Arquitectura Actual AS-IS — siempre visible (fallback local si IA no retorna campo)
-    const currBox  = document.getElementById('current-arch-box');
-    if (currBox) {
-        const currArch   = aiData?.current_architecture;
-        const scoreEl    = document.getElementById('coupling-score');
-        const analysisEl = document.getElementById('coupling-analysis');
-        const painEl     = document.getElementById('pain-points');
-
-        // Score: usar el de la IA o estimar localmente con criticCount
-        const score = currArch?.coupling_score
-            ?? Math.min(10, 3 + (lastFindings.filter(f => f.sev === 'CRITICO').length) * 2);
-        const scoreColor = score >= 7 ? 'var(--red)' : score >= 4 ? 'var(--yellow)' : 'var(--green)';
-        if (scoreEl) { scoreEl.innerText = score; scoreEl.style.color = scoreColor; }
-        if (analysisEl && currArch?.coupling_analysis) analysisEl.innerText = currArch.coupling_analysis;
-        if (painEl && currArch?.pain_points?.length) {
-            painEl.innerHTML = currArch.pain_points.map(p =>
-                `<div style="font-size:.75rem;color:var(--red);padding:.2rem 0">▸ ${p}</div>`
-            ).join('');
-        }
-        // El diagrama AS-IS se renderiza en triggerMermaid() — visible siempre
-        currBox.style.display = 'block';
-    }
-
-    // ── Matriz de Riesgos
-    const riskBox  = document.getElementById('risk-box');
-    const riskBody = document.getElementById('risk-body');
-    if (aiData?.risk_matrix?.length && riskBox && riskBody) {
-        const probColor = p => p === 'Alta' ? 'var(--red)' : p === 'Media' ? 'var(--yellow)' : 'var(--green)';
-        const impColor  = i => i === 'Crítico' ? 'var(--red)' : i === 'Alto' ? 'var(--yellow)' : 'var(--blue)';
-        riskBody.innerHTML = aiData.risk_matrix.map(r => `
-            <tr style="border-bottom:1px solid rgba(255,255,255,.04)">
-                <td style="padding:.45rem .4rem;font-size:.75rem;font-weight:600">${r.risk || ''}</td>
-                <td style="padding:.45rem .4rem;text-align:center">
-                    ${r.cve && r.cve !== 'N/A'
-                        ? `<a href="https://nvd.nist.gov/vuln/detail/${r.cve}" target="_blank" rel="noopener" style="font-size:.65rem;color:var(--red);text-decoration:none;background:rgba(255,65,108,.15);padding:.1rem .35rem;border-radius:4px">${r.cve}</a>`
-                        : `<span style="font-size:.65rem;color:var(--t2)">—</span>`}
-                </td>
-                <td style="padding:.45rem .4rem;text-align:center;font-size:.72rem;font-weight:700;color:${probColor(r.probability)}">${r.probability || ''}</td>
-                <td style="padding:.45rem .4rem;text-align:center;font-size:.72rem;font-weight:700;color:${impColor(r.impact)}">${r.impact || ''}</td>
-                <td style="padding:.45rem .4rem;font-size:.72rem;color:var(--t2)">${r.mitigation || ''}</td>
-            </tr>`).join('');
-        riskBox.style.display = 'block';
-    }
-
-    // ── Remediación de Código (expandida)
-    const remedBox  = document.getElementById('remed-box');
-    const remedList = document.getElementById('remed-list');
-    if (aiData?.code_remediation?.length && remedBox && remedList) {
-        const priColor = p => p?.startsWith('P1') ? 'var(--red)' : p?.startsWith('P2') ? 'var(--yellow)' : 'var(--blue)';
-        remedList.innerHTML = aiData.code_remediation.map(r => `
-            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:10px;padding:.8rem 1rem">
-                <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.4rem">
-                    <span style="font-weight:700;font-size:.82rem;color:var(--blue)">${r.file || ''}</span>
-                    ${r.priority ? `<span style="font-size:.62rem;font-weight:700;padding:.15rem .5rem;border-radius:10px;background:rgba(0,0,0,.4);color:${priColor(r.priority)};border:1px solid ${priColor(r.priority)}">${r.priority}</span>` : ''}
-                    ${r.effort ? `<span style="font-size:.62rem;color:var(--t2);margin-left:auto">${r.effort}</span>` : ''}
-                </div>
-                <div style="font-size:.78rem;color:#e0e0e0;margin-bottom:.3rem"><b>Problema:</b> ${r.issue || ''}</div>
-                <div style="font-size:.78rem;color:var(--green);margin-bottom:.3rem"><b>Acción:</b> ${r.action || ''}</div>
-                ${r.before ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-top:.4rem">
-                    <div><div style="font-size:.6rem;color:var(--red);margin-bottom:.2rem">ANTES</div><pre style="font-size:.65rem;max-height:80px;overflow:auto">${r.before}</pre></div>
-                    <div><div style="font-size:.6rem;color:var(--green);margin-bottom:.2rem">DESPUÉS</div>${r.after ? `<pre style="font-size:.65rem;max-height:80px;overflow:auto">${r.after}</pre>` : '<div style="font-size:.65rem;color:var(--t2);font-style:italic;padding:.5rem;background:rgba(0,0,0,.2);border-radius:4px">Acción: elimina código.</div>'}</div>
-                </div>` : ''}
-                ${r.benefit ? `<div style="font-size:.72rem;color:var(--t2);margin-top:.3rem;border-top:1px solid var(--bdr);padding-top:.3rem">${r.benefit}</div>` : ''}
-            </div>`).join('');
-        remedBox.style.display = 'block';
-    }
-
-    // ── Java Findings (CVEs)
-    const jfBox  = document.getElementById('java-findings-box');
-    const jfList = document.getElementById('java-findings-list');
-    if (aiData?.java_findings?.length && jfBox && jfList) {
-        const sevColor = s => s === 'CRITICO' ? 'var(--red)' : s === 'ALTO' ? '#ff9f43' : s === 'MEDIO' ? 'var(--yellow)' : 'var(--t2)';
-        jfList.innerHTML = aiData.java_findings.map(f => `
-            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:8px;padding:.6rem .9rem;display:flex;flex-wrap:wrap;gap:.5rem;align-items:flex-start">
-                <span style="font-size:.65rem;font-weight:700;padding:.15rem .5rem;border-radius:8px;background:rgba(0,0,0,.4);color:${sevColor(f.severity)};border:1px solid ${sevColor(f.severity)};white-space:nowrap">${f.severity || ''}</span>
-                <div style="flex:1;min-width:0">
-                    <div style="font-weight:700;font-size:.8rem;color:var(--blue)">${f.component || ''}${f.version ? ` <span style="font-size:.68rem;color:var(--t2);font-weight:400">v${f.version}</span>` : ''}</div>
-                    <div style="font-size:.75rem;color:#ddd;margin-top:.2rem">${f.issue || ''}</div>
-                    ${f.recommendation ? `<div style="font-size:.72rem;color:var(--green);margin-top:.2rem">→ ${f.recommendation}</div>` : ''}
-                </div>
-                ${f.cve && f.cve !== 'N/A' ? `<a href="https://nvd.nist.gov/vuln/detail/${f.cve}" target="_blank" rel="noopener" style="font-size:.62rem;color:var(--red);text-decoration:none;background:rgba(255,65,108,.15);padding:.15rem .45rem;border-radius:4px;white-space:nowrap;align-self:flex-start">${f.cve}</a>` : ''}
-            </div>`).join('');
-        jfBox.style.display = 'block';
-    }
-
-    // ── Code Transformation (JEE → Spring Boot)
-    const ctBox  = document.getElementById('code-transform-box');
-    const ctList = document.getElementById('code-transform-list');
-    if (aiData?.code_transformation?.length && ctBox && ctList) {
-        ctList.innerHTML = aiData.code_transformation.map(t => `
-            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:10px;padding:.8rem 1rem">
-                <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.4rem">
-                    <span style="font-weight:700;font-size:.82rem;color:var(--blue)">${t.class_name || ''}</span>
-                    ${t.effort_days ? `<span style="font-size:.62rem;color:var(--t2);margin-left:auto">${t.effort_days}d</span>` : ''}
-                </div>
-                <div style="font-size:.72rem;color:var(--t2);margin-bottom:.3rem">
-                    <span style="color:var(--red)">${t.current_pattern || ''}</span> → <span style="color:var(--green)">${t.target_pattern || ''}</span>
-                </div>
-                ${t.why ? `<div style="font-size:.75rem;color:#ddd;margin-bottom:.4rem">${t.why}</div>` : ''}
-                ${t.before ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-top:.4rem">
-                    <div><div style="font-size:.6rem;color:var(--red);margin-bottom:.2rem">ANTES (JEE)</div><pre style="font-size:.64rem;max-height:120px;overflow:auto;background:rgba(255,65,108,.05);border:1px solid rgba(255,65,108,.2);padding:.4rem;border-radius:4px">${t.before}</pre></div>
-                    <div><div style="font-size:.6rem;color:var(--green);margin-bottom:.2rem">DESPUES (Spring Boot)</div><pre style="font-size:.64rem;max-height:120px;overflow:auto;background:rgba(0,255,150,.05);border:1px solid rgba(0,255,150,.2);padding:.4rem;border-radius:4px">${t.after || ''}</pre></div>
-                </div>` : ''}
-                ${t.dependencies_to_add?.length ? `<div style="font-size:.68rem;color:var(--green);margin-top:.3rem">+ ${t.dependencies_to_add.join(', ')}</div>` : ''}
-                ${t.dependencies_to_remove?.length ? `<div style="font-size:.68rem;color:var(--red)">- ${t.dependencies_to_remove.join(', ')}</div>` : ''}
-            </div>`).join('');
-        ctBox.style.display = 'block';
-    }
-
-    // ── SQL Analysis
-    const sqlBox  = document.getElementById('sql-analysis-box');
-    const sqlList = document.getElementById('sql-analysis-list');
-    if (aiData?.sql_analysis?.length && sqlBox && sqlList) {
-        sqlList.innerHTML = aiData.sql_analysis.map(s => `
-            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:8px;padding:.6rem .9rem">
-                ${s.class ? `<div style="font-size:.68rem;color:var(--blue);margin-bottom:.3rem;font-weight:600">${s.class}</div>` : ''}
-                <pre style="font-size:.66rem;background:rgba(255,200,0,.05);border:1px solid rgba(255,200,0,.2);padding:.4rem;border-radius:4px;margin-bottom:.3rem;overflow:auto;max-height:60px">${s.query || ''}</pre>
-                ${s.jpa_equivalent ? `<div style="font-size:.7rem;color:var(--green)">JPA: <code style="background:rgba(0,255,150,.1);padding:.1rem .3rem;border-radius:3px">${s.jpa_equivalent}</code></div>` : ''}
-                ${s.recommendation ? `<div style="font-size:.7rem;color:var(--t2);margin-top:.2rem">${s.recommendation}</div>` : ''}
-            </div>`).join('');
-        sqlBox.style.display = 'block';
-    }
-
-    // ── Externalization
-    const extBox  = document.getElementById('externalization-box');
-    const extList = document.getElementById('externalization-list');
-    if (aiData?.externalization?.length && extBox && extList) {
-        extList.innerHTML = aiData.externalization.map(e => `
-            <div style="background:rgba(0,0,0,.25);border:1px solid var(--bdr);border-radius:8px;padding:.55rem .85rem;display:flex;flex-wrap:wrap;gap:.5rem;align-items:flex-start">
-                <span style="font-size:.62rem;font-weight:700;padding:.12rem .45rem;border-radius:6px;background:rgba(0,163,255,.15);color:var(--blue);white-space:nowrap">${e.type || ''}</span>
-                <div style="flex:1;min-width:0">
-                    <div style="font-size:.74rem;color:#ddd">${e.found_in || ''} ${e.current_value ? `<code style="font-size:.65rem;color:var(--yellow);background:rgba(255,200,0,.1);padding:.1rem .3rem;border-radius:3px">${e.current_value}</code>` : ''}</div>
-                    ${e.target ? `<div style="font-size:.7rem;color:var(--green);margin-top:.15rem">→ ${e.target}</div>` : ''}
-                    ${e.how ? `<div style="font-size:.68rem;color:var(--t2);margin-top:.1rem">${e.how}</div>` : ''}
-                </div>
-            </div>`).join('');
-        extBox.style.display = 'block';
-    }
-
-    // ── Containerization (Dockerfile)
-    const jcBox     = document.getElementById('java-container-box');
-    const jcContent = document.getElementById('java-container-content');
-    if (aiData?.containerization && jcBox && jcContent) {
-        const c = aiData.containerization;
-        
-        // Determinar qué código mostrar por defecto (lift_shift o modernized)
-        const d_lift = c.dockerfile_lift_shift || c.dockerfile || '# Dockerfile Lift & Shift no disponible';
-        const d_mod  = c.dockerfile_modernized || '# Dockerfile Modernizado no disponible';
-        
-        jcContent.innerHTML = `
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-bottom:.6rem">
-                ${c.base_image ? `<div><span style="font-size:.65rem;color:var(--t2)">BASE IMAGE</span><div style="font-size:.78rem;color:var(--blue);font-weight:600">${c.base_image}</div></div>` : ''}
-                ${c.jvm_flags ? `<div><span style="font-size:.65rem;color:var(--t2)">JVM FLAGS</span><div style="font-size:.68rem;color:var(--yellow)">${c.jvm_flags}</div></div>` : ''}
-            </div>
-            
-            ${c.toxic_dependencies && c.toxic_dependencies.length > 0 && c.toxic_dependencies[0] !== "Ninguna" && !c.toxic_dependencies[0].includes("Ninguna detectada") ? `
-            <div style="margin-bottom:.6rem;background:rgba(255,65,108,.1);border:1px solid var(--red);border-radius:6px;padding:.5rem;font-size:.7rem;color:var(--red)">
-                <strong style="display:block;margin-bottom:.2rem">⚠ TOXIC DEPENDENCIES (Bloqueantes de Containerización)</strong>
-                <ul style="margin:0;padding-left:1.2rem">${c.toxic_dependencies.map(td => `<li>${td}</li>`).join('')}</ul>
-            </div>` : ''}
-
-            <div style="margin-bottom:.4rem;display:flex;gap:.5rem;border-bottom:1px solid var(--bdr);padding-bottom:.3rem">
-                <button onclick="document.getElementById('df-lift').style.display='block';document.getElementById('df-mod').style.display='none';this.style.color='var(--blue)';this.nextElementSibling.style.color='var(--t2)'" style="background:none;border:none;color:var(--blue);cursor:pointer;font-size:.7rem;font-weight:bold;padding:0">Lift & Shift</button>
-                <button onclick="document.getElementById('df-mod').style.display='block';document.getElementById('df-lift').style.display='none';this.style.color='var(--blue)';this.previousElementSibling.style.color='var(--t2)'" style="background:none;border:none;color:var(--t2);cursor:pointer;font-size:.7rem;font-weight:bold;padding:0">Modernizado (Spring Boot)</button>
-            </div>
-
-            <pre id="df-lift" style="font-size:.64rem;background:rgba(0,0,0,.4);border:1px solid var(--bdr);padding:.7rem;border-radius:6px;overflow:auto;max-height:220px;margin-bottom:.5rem">${d_lift}</pre>
-            <pre id="df-mod" style="font-size:.64rem;background:rgba(0,0,0,.4);border:1px solid var(--bdr);padding:.7rem;border-radius:6px;overflow:auto;max-height:220px;margin-bottom:.5rem;display:none">${d_mod}</pre>
-
-            ${c.env_vars?.length ? `<div style="font-size:.7rem;color:var(--t2);margin-top:.3rem"><b style="color:#ddd">ENV VARS:</b> ${c.env_vars.join(' · ')}</div>` : ''}
-            ${c.health_check ? `<div style="font-size:.7rem;color:var(--green);margin-top:.3rem"><b>HEALTHCHECK:</b> <code>${c.health_check}</code></div>` : ''}
+    // ── CloudNative / SRE Content (Pilar 4 - SRE)
+    const cn = aiData?.cloudnative || {};
+    const sreHealthBox = document.getElementById('sre-health-box');
+    const sre12Box     = document.getElementById('sre-12factor-box');
+    const sreRunBox    = document.getElementById('sre-runbook-box');
+    
+    // Healthchecks en p4
+    if (cn.healthcheck_config && sreHealthBox) {
+        const hc = cn.healthcheck_config;
+        document.getElementById('sre-health-content').innerHTML = `
+            <div style="font-size:.72rem;color:var(--green)">LIVENESS: ${hc.liveness_probe || '—'}</div>
+            <div style="font-size:.72rem;color:var(--blue)">READINESS: ${hc.readiness_probe || '—'}</div>
         `;
-        jcBox.style.display = 'block';
+        sreHealthBox.style.display = 'block';
     }
 
-    // ── CloudNative Agent — Artefactos de Migración
-    _renderCloudNative(aiData?.cloudnative);
+    // 12-factor en p4
+    if (cn.twelve_factor_violations?.length && sre12Box) {
+        document.getElementById('sre-12factor-list').innerHTML = cn.twelve_factor_violations.map(v => 
+            `<div style="font-size:.72rem;color:var(--yellow);padding:.2rem 0">⚠ ${v}</div>`
+        ).join('');
+        sre12Box.style.display = 'block';
+        if (document.getElementById('sre-empty')) document.getElementById('sre-empty').style.display = 'none';
+    }
 
-    // ── Business/FinOps Agent — TCO y ROI
-    _renderBusiness(aiData?.business);
+    // Runbooks en p4
+    if (cn.sre_runbook?.length && sreRunBox) {
+        document.getElementById('sre-runbook-list').innerHTML = cn.sre_runbook.map(r => `
+            <div style="background:rgba(0,0,0,.3);padding:.6rem;border-radius:8px">
+                <div style="font-weight:700;font-size:.78rem;color:var(--blue)">${r.title}</div>
+                <div style="font-size:.68rem;color:var(--t2)">${r.trigger || ''}</div>
+            </div>`).join('');
+        sreRunBox.style.display = 'block';
+    }
 
-    // Code blocks — generar localmente si IA no los retornó
+    // ── Business / TCO / ROI (Pilar 5 - FinOps)
+    const biz = aiData?.business;
+    if (biz && biz.risk_score) {
+        document.getElementById('finops-business-box').style.display = 'block';
+        document.getElementById('finops-csuite').innerHTML = `<b>Executive ROI Summary:</b> ${biz.c_suite_summary || ''}`;
+        document.getElementById('finops-tco-legacy').innerText = biz.tco_legacy?.total_annual ? '$' + biz.tco_legacy.total_annual.toLocaleString() : '—';
+        document.getElementById('finops-tco-aws').innerText = biz.tco_aws?.total_annual ? '$' + biz.tco_aws.total_annual.toLocaleString() : '—';
+        
+        const roiCont = document.getElementById('finops-roi-content');
+        if (roiCont && biz.roi) {
+            const r = biz.roi;
+            roiCont.innerHTML = `
+                <div style="text-align:center">
+                    <div style="font-size:1.1rem;font-weight:700;color:var(--green)">${r.roi_pct}%</div>
+                    <div style="font-size:.6rem;color:var(--t2)">ROI</div>
+                </div>
+                <div style="text-align:center">
+                    <div style="font-size:1.1rem;font-weight:700;color:var(--blue)">${r.payback_months} m</div>
+                    <div style="font-size:.6rem;color:var(--t2)">Payback</div>
+                </div>
+            `;
+        }
+        if (document.getElementById('finops-empty')) document.getElementById('finops-empty').style.display = 'none';
+    }
+
     _renderIaC(lastDetectedTechs, lastHost);
-
-    // Trigger diagrams if current page needs it
     window.triggerMermaid();
 };
 
+// ─── FinOps Pro Logic ─────────────────────────────────────────────────────────
+
+window.loadFinOps = async function() {
+    if (!lastScanId) return;
+    const btn = document.getElementById('finops-load-btn');
+    const badge = document.getElementById('finops-cache-badge');
+    if (btn) btn.disabled = true;
+    
+    try {
+        const apiUrl = window.API_URL || 'http://localhost:8000';
+        const r = await fetch(`${apiUrl}/finops/${lastScanId}`, { headers: authHeaders() });
+        if (!r.ok) throw new Error('Error cargando FinOps');
+        const res = await r.json();
+        
+        if (res.status === 'success') {
+            const d = res.data;
+            document.getElementById('finops-tabs-box').style.display = 'block';
+            if (badge) {
+                badge.innerText = 'Actualizado: ' + new Date(res.timestamp).toLocaleTimeString();
+                badge.style.display = 'inline';
+            }
+            
+            // 1. Multi-Cloud Tab
+            _renderFinOpsMultiCloud(d.multicloud);
+            // 2. AWS Optimizer Tab
+            _renderFinOpsOptimizer(d.aws_optimization);
+            // 3. Right-Sizing Tab
+            _renderFinOpsRightSizing(d.rightsizing);
+            // 4. Sprint Cost Tab
+            _renderFinOpsSprintCost(d.sprint_cost);
+
+            if (document.getElementById('finops-empty')) document.getElementById('finops-empty').style.display = 'none';
+        }
+    } catch(e) {
+        console.error('FinOps Load Error:', e);
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+};
+
+window.showFinOpsTab = function(tabId) {
+    ['mc','opt','rs','sc'].forEach(t => {
+        const content = document.getElementById(`finops-tab-${t}-content`);
+        const btn = document.getElementById(`finops-tab-${t}`);
+        if (content) content.style.display = (t === tabId) ? 'block' : 'none';
+        if (btn) btn.style.opacity = (t === tabId) ? '1' : '.5';
+    });
+};
+
+function _renderFinOpsMultiCloud(mc) {
+    if (!mc) return;
+    const recEl = document.getElementById('finops-mc-recommendation');
+    if (recEl) {
+        recEl.innerHTML = `<span style="color:var(--green);font-weight:700">Recomendación: AWS (${mc.recommendation || 'Lider'})</span><br><span style="font-size:.72rem;color:var(--t2)">${mc.recommendation_rationale || ''}</span>`;
+        recEl.style.display = 'block';
+    }
+
+    const tbody = document.getElementById('finops-mc-table-body');
+    if (tbody) {
+        const clouds = ['aws', 'azure', 'gcp'];
+        tbody.innerHTML = clouds.map(c => {
+            const d = mc[c] || {};
+            const total = d.monthly_usd || 0;
+            const b = d.breakdown || [];
+            const getPrice = (name) => (b.find(x => x.service.toLowerCase().includes(name))?.cost_usd || 0);
+            
+            return `<tr style="border-bottom:1px solid rgba(255,255,255,.05)">
+                <td style="font-weight:700;text-transform:uppercase;color:var(--blue)">${c}</td>
+                <td style="text-align:right">$${getPrice('fargate') || getPrice('container') || getPrice('run')}</td>
+                <td style="text-align:right">$${getPrice('rds') || getPrice('database') || getPrice('sql')}</td>
+                <td style="text-align:right">$${getPrice('cache') || getPrice('redis') || 0}</td>
+                <td style="text-align:right">$${getPrice('lb') || getPrice('alb') || 0}</td>
+                <td style="text-align:right;font-weight:700;color:var(--green)">$${total}</td>
+            </tr>`;
+        }).join('');
+    }
+
+    const prosEl = document.getElementById('finops-mc-pros');
+    if (prosEl) {
+        const clouds = ['aws', 'azure', 'gcp'];
+        prosEl.innerHTML = clouds.map(c => {
+            const pros = mc[c]?.pros || [];
+            return `<div class="card" style="padding:.6rem">
+                <div style="font-size:.65rem;font-weight:700;margin-bottom:.3rem;color:var(--blue)">PROS ${c.toUpperCase()}</div>
+                ${pros.map(p => `<div style="font-size:.68rem;color:var(--t2);padding:.1rem 0">✓ ${p}</div>`).join('')}
+            </div>`;
+        }).join('');
+    }
+}
+
+function _renderFinOpsOptimizer(opt) {
+    if (!opt) return;
+    const sumEl = document.getElementById('finops-opt-summary');
+    if (sumEl) sumEl.innerHTML = `Potencial de Ahorro: <b style="color:var(--green)">${opt.estimated_savings_pct}%</b> | Cobertura Savings Plans: <b style="color:var(--blue)">${(opt.savings_plans_coverage*100).toFixed(0)}%</b>`;
+    
+    const listEl = document.getElementById('finops-opt-list');
+    if (listEl && opt.recommendations) {
+        listEl.innerHTML = opt.recommendations.map(r => `
+            <div style="background:rgba(0,163,255,.05);border:1px solid rgba(0,163,255,.2);border-radius:8px;padding:.6rem .8rem">
+                <div style="display:flex;justify-content:space-between;margin-bottom:.2rem">
+                    <span style="font-weight:700;font-size:.8rem;color:var(--blue)">${r.service}</span>
+                    <span style="color:var(--green);font-weight:700">Ahorro: $${r.savings_usd_monthly}/mes</span>
+                </div>
+                <div style="font-size:.72rem;color:var(--t2)">De <b>${r.current}</b> a <b>${r.recommended}</b></div>
+                <div style="font-size:.68rem;color:#ddd;margin-top:.3rem;font-style:italic">"${r.rationale}"</div>
+            </div>`).join('');
+    }
+}
+
+function _renderFinOpsRightSizing(rs) {
+    if (!rs) return;
+    const sigEl = document.getElementById('finops-rs-signals');
+    if (sigEl) sigEl.innerHTML = `<b>Señales detectadas:</b> ${rs.signals_used || 'Análisis de dependencias y stack detectado'}`;
+
+    const tbody = document.getElementById('finops-rs-table-body');
+    if (tbody && rs.recommendations) {
+        tbody.innerHTML = rs.recommendations.map(r => `
+            <tr style="border-bottom:1px solid rgba(255,255,255,.05)">
+                <td>${r.service}</td>
+                <td style="text-align:center">${r.current_default || r.current || '—'}</td>
+                <td style="text-align:center;color:var(--green);font-weight:700">${r.recommended}</td>
+                <td style="text-align:right;color:var(--blue)">$${r.monthly_savings_usd}</td>
+                <td style="font-size:.7rem;color:var(--t2)">${r.reason}</td>
+            </tr>`).join('');
+    }
+}
+
+function _renderFinOpsSprintCost(sc) {
+    if (!sc) return;
+    const sumEl = document.getElementById('finops-sc-summary');
+    if (sumEl) {
+        sumEl.innerHTML = `
+            <div class="card" style="padding:.6rem;text-align:center">
+                <div style="font-size:.6rem;color:var(--t2)">CAPEX TOTAL</div>
+                <div style="font-size:1.1rem;font-weight:700;color:var(--red)">$${(sc.total_one_time_usd||0).toLocaleString()}</div>
+            </div>
+            <div class="card" style="padding:.6rem;text-align:center">
+                <div style="font-size:.6rem;color:var(--t2)">OPTIMIZADO</div>
+                <div style="font-size:1.1rem;font-weight:700;color:var(--green)">$${(sc.optimized_usd||0).toLocaleString()}</div>
+            </div>
+            <div class="card" style="padding:.6rem;text-align:center">
+                <div style="font-size:.6rem;color:var(--t2)">AHORRO MIGRACION</div>
+                <div style="font-size:1.1rem;font-weight:700;color:var(--blue)">$${((sc.total_one_time_usd||0)-(sc.optimized_usd||0)).toLocaleString()}</div>
+            </div>
+        `;
+    }
+
+    const listEl = document.getElementById('finops-sc-list');
+    if (listEl && sc.sprint_breakdown) {
+        listEl.innerHTML = sc.sprint_breakdown.map(s => `
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:.4rem .8rem;background:rgba(255,255,255,.03);border-radius:6px;border:1px solid var(--bdr)">
+                <span style="font-size:.78rem;font-weight:700;color:var(--blue)">${s.sprint}</span>
+                <div style="text-align:right">
+                    <div style="font-size:.78rem;font-weight:700;color:var(--yellow)">$${(s.cost_usd||0).toLocaleString()}</div>
+                    <div style="font-size:.65rem;color:var(--t2)">${s.rationale || ''}</div>
+                </div>
+            </div>`).join('');
+    }
+}
+
 window.spB = function(t, i) {
     if (!i) i = [];
+    const renderItem = x => {
+        if (typeof x === 'string') return `<li style="padding:.3rem 0;border-bottom:1px solid rgba(255,255,255,.05)">${x}</li>`;
+        const title = x.title || x.task || String(x);
+        const desc  = x.description || '';
+        const effort= x.effort ? `<span style="color:var(--blue);font-weight:600;margin-left:.4rem">${x.effort}</span>` : '';
+        const owner = x.owner ? `<span style="opacity:.6;font-size:.72rem;margin-left:.4rem">[${x.owner}]</span>` : '';
+        const dep   = (x.depends_on && x.depends_on !== 'N/A') ? `<span style="opacity:.5;font-size:.7rem;margin-left:.4rem">← ${x.depends_on}</span>` : '';
+        return `<li style="padding:.4rem 0;border-bottom:1px solid rgba(255,255,255,.05)">
+            <div style="display:flex;gap:.2rem;align-items:baseline;flex-wrap:wrap">
+                <span style="font-weight:600">${title}</span>${effort}${owner}${dep}
+            </div>
+            ${desc ? `<div style="opacity:.75;font-size:.75rem;margin-top:.2rem;line-height:1.4">${desc}</div>` : ''}
+        </li>`;
+    };
     return `<div style="margin-bottom:1rem">
         <div style="font-weight:700;color:var(--blue);margin-bottom:.4rem">${t}</div>
         <ul style="list-style:none;font-size:.78rem">
-            ${i.map(x => `<li style="padding:.25rem 0">${x}</li>`).join('')}
+            ${i.map(renderItem).join('')}
         </ul>
     </div>`;
 };
@@ -2428,13 +2598,15 @@ window.loadHistory = async function(id) {
 function _activateScanActions(scanId, hostname) {
     lastScanId = scanId;
     const pdfBtn       = document.getElementById('pdf-btn');
+    const bundleBtn    = document.getElementById('bundle-btn');
     const jiraBtn      = document.getElementById('jira-btn');
     const reanalyzeBtn = document.getElementById('reanalyze-btn');
     const fab          = document.getElementById('chat-fab');
     const label        = document.getElementById('chat-scan-label');
     if (pdfBtn)       pdfBtn.style.display       = scanId ? 'inline-block' : 'none';
+    if (bundleBtn)    bundleBtn.style.display    = scanId ? 'inline-block' : 'none';
     if (jiraBtn)      jiraBtn.style.display      = scanId ? 'inline-block' : 'none';
-    if (reanalyzeBtn) reanalyzeBtn.style.display = 'inline-block';  // siempre visible tras análisis
+    if (reanalyzeBtn) reanalyzeBtn.style.display = 'inline-block';
     if (fab)          fab.style.display          = scanId ? 'flex' : 'none';
     if (label)        label.innerText            = scanId ? hostname || scanId.slice(0,8) : 'Sin analisis activo';
 }
@@ -2494,6 +2666,40 @@ async function _captureDiagramPng(elementId) {
     }
 }
 
+// ─── Migration Bundle Download ────────────────────────────────────────────────
+window.downloadMigrationBundle = async function() {
+    if (!lastScanId) { alert('Ejecuta un análisis primero.'); return; }
+    const btn = document.getElementById('bundle-btn');
+    const orig = btn ? btn.innerText : '';
+    if (btn) { btn.innerText = '⏳ Empaquetando...'; btn.disabled = true; }
+
+    try {
+        const apiUrl = window.API_URL || 'http://localhost:8000';
+        const r = await fetch(`${apiUrl}/migration-bundle/${lastScanId}`, { headers: authHeaders() });
+        if (!r.ok) {
+            const e = await r.json().catch(() => ({}));
+            throw new Error(e.detail || `Error ${r.status}`);
+        }
+        const blob = await r.blob();
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        const disp = r.headers.get('Content-Disposition') || '';
+        const match = disp.match(/filename="([^"]+)"/);
+        const safeHost = (lastHost || 'app').replace(/[^a-z0-9]/gi, '-').toLowerCase();
+        const today    = new Date().toISOString().slice(0, 10);
+        a.download = match ? match[1] : `migration-bundle_${safeHost}_${today}.zip`;
+        a.href = url;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        if (btn) { btn.innerText = '✓ Descargado'; setTimeout(() => { btn.innerText = orig; btn.disabled = false; }, 2000); }
+    } catch(e) {
+        alert('Error generando bundle: ' + e.message);
+        if (btn) { btn.innerText = orig; btn.disabled = false; }
+    }
+};
+
 // ─── PDF Download ─────────────────────────────────────────────────────────────
 window.downloadPdf = async function() {
     const apiUrl = window.API_URL || 'http://localhost:8000';
@@ -2552,7 +2758,9 @@ window.downloadPdf = async function() {
                             const blob2 = await r2.blob();
                             const url2 = URL.createObjectURL(blob2);
                             const a2 = document.createElement('a');
-                            a2.href = url2; a2.download = `modernization-report-${fallbackId.slice(0,8)}.pdf`;
+                            const safeH2 = (lastHost || 'server').replace(/[^a-z0-9]/gi, '-').toLowerCase();
+                            const tod2   = new Date().toISOString().slice(0, 10);
+                            a2.href = url2; a2.download = `modernization-report_${safeH2}_${tod2}.pdf`;
                             a2.click(); URL.revokeObjectURL(url2);
                             lastScanId = fallbackId;
                             setAiStatus('done', '✓ PDF descargado (scan más reciente)');
@@ -2568,7 +2776,12 @@ window.downloadPdf = async function() {
         const url  = URL.createObjectURL(blob);
         const a    = document.createElement('a');
         a.href     = url;
-        a.download = `modernization-report-${lastScanId.slice(0,8)}.pdf`;
+        // Intentar leer nombre del header; si no, usar hostname + fecha
+        const disp2  = r.headers.get('Content-Disposition') || '';
+        const match2 = disp2.match(/filename="([^"]+)"/);
+        const safeHost = (lastHost || 'server').replace(/[^a-z0-9]/gi, '-').toLowerCase();
+        const today    = new Date().toISOString().slice(0, 10);
+        a.download = match2 ? match2[1] : `modernization-report_${safeHost}_${today}.pdf`;
         a.click();
         URL.revokeObjectURL(url);
         setAiStatus('done', '✓ PDF descargado con diagramas');
