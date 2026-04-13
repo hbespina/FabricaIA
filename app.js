@@ -1741,10 +1741,10 @@ function _renderLocalUI(data) {
     document.getElementById('sread').innerText = maxRisk >= 8 ? 'Baja' : (data.criticalCount >= 1 ? 'Media' : 'Lista');
     document.getElementById('ssum').innerHTML  = `<p><b>Host:</b> ${data.host}</p><p><b>OS:</b> ${data.osStr}</p>`;
 
-    document.getElementById('fop').innerText = '$' + data.costs.totalOpEx.toLocaleString();
-    document.getElementById('fmi').innerText = '$' + data.costs.migrationCost.toLocaleString();
-    document.getElementById('fpa').innerText = typeof data.costs.paybackMonths === 'number' ? data.costs.paybackMonths + ' meses' : 'N/A';
-    document.getElementById('fin').innerText = '$' + data.costs.annualCostInaction.toLocaleString();
+    const fop = document.getElementById('fop'); if (fop) fop.innerText = '$' + data.costs.totalOpEx.toLocaleString();
+    const fmi = document.getElementById('fmi'); if (fmi) fmi.innerText = '$' + data.costs.migrationCost.toLocaleString();
+    const fpa = document.getElementById('fpa'); if (fpa) fpa.innerText = typeof data.costs.paybackMonths === 'number' ? data.costs.paybackMonths + ' meses' : 'N/A';
+    const fin = document.getElementById('fin'); if (fin) fin.innerText = '$' + data.costs.annualCostInaction.toLocaleString();
     
     // TCO Detalles
     if(document.getElementById('tcper')) document.getElementById('tcper').innerText = '$' + (data.costs.perpetualAmort || 0).toLocaleString();
