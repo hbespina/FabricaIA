@@ -1225,8 +1225,9 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
     code_result = {}
     java_result = {}
     cn_result   = {}   # CloudNative agent
-    biz_result  = {}   # Business/FinOps agent
-    agents_ok   = False
+    biz_result      = {}   # Business/FinOps agent
+    cost_opt_result = {}   # CostOptimization agent
+    agents_ok       = False
 
     try:
         # ── Estructurar el mensaje con secciones etiquetadas (mejor comprensión por agentes)
@@ -1292,6 +1293,14 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
             return _call_agent(bedrock, mid, 3500,
                                _common_ctx + _AGENT_BUSINESS_PROMPT, inv_msg)
 
+        def run_cost_optimization():
+            # Needs biz_result — called in Stage 2 after Stage 1 is complete
+            ctx = inv_msg
+            if biz_result:
+                ctx += f"\n\n[BUSINESS_AGENT_TCO — usar como contexto base para los cálculos]\n{json.dumps(biz_result, ensure_ascii=False)[:3000]}"
+            return _call_agent(bedrock, mid, 3072,
+                               _common_ctx + _AGENT_COST_OPT_PROMPT, ctx)
+
         # Etapa 1a: Security + Code + Business en paralelo (+ Java + CloudNative si es artefacto)
         n_agents = 6 if is_java_artifact else 4
         _update_job_status(job_id, "running", f"Ejecutando {n_agents} agentes especializados en paralelo...")
@@ -1323,12 +1332,22 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
         _update_job_status(job_id, "running",
                            f"Security/Code{'/ Java' if is_java_artifact else ''} completados...")
 
-        # Etapa 1b: Migration (usa sec_result si está disponible)
-        _update_job_status(job_id, "running", "Agente Migration planificando sprints...")
-        try:
-            mig_result = run_migration()
-        except Exception as e:
-            logger.warning("[Job %s] MigrationAgent falló: %s", job_id[:8], e)
+        # Etapa 1b: Migration + CostOptimization en paralelo (Stage 1 ya completado)
+        _update_job_status(job_id, "running", "Stage 2 — Migration + CostOptimization...")
+        with ThreadPoolExecutor(max_workers=2) as ex2:
+            f_mig  = ex2.submit(run_migration)
+            f_cost = ex2.submit(run_cost_optimization)
+            stage2_map = {f_mig: "migration", f_cost: "cost_opt"}
+            for fut in as_completed(stage2_map):
+                lbl = stage2_map[fut]
+                try:
+                    res = fut.result()
+                    if lbl == "migration":
+                        mig_result.update(res)
+                    else:
+                        cost_opt_result.update(res)
+                except Exception as e:
+                    logger.warning("[Job %s] Agente '%s' falló: %s", job_id[:8], lbl, e)
 
         agents_ok = bool(sec_result or mig_result or code_result or java_result)
 
@@ -1395,6 +1414,13 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
                 "roi":              biz_result.get("roi", {}),
                 "c_suite_summary":  biz_result.get("c_suite_summary", ""),
                 "cost_drivers":     biz_result.get("cost_drivers", []),
+            },
+            # CostOptimization agent
+            "cost_optimization": {
+                "multicloud":       cost_opt_result.get("multicloud", {}),
+                "aws_optimization": cost_opt_result.get("aws_optimization", {}),
+                "rightsizing":      cost_opt_result.get("rightsizing", {}),
+                "sprint_cost":      cost_opt_result.get("sprint_cost", {}),
             },
             "_analysis_method":    "agentic_parallel" + ("_java" if is_java_artifact else ""),
             "_rag_used":           bool(rag_ctx),
