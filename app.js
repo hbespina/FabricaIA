@@ -2192,6 +2192,8 @@ function _renderSre(cn) {
 }
 
 window.updateAiFields = function(aiData, sh) {
+    lastAiData = aiData;
+    lastSh = sh;
 
     // ── Resumen Ejecutivo
     const execBox  = document.getElementById('exec-box');
@@ -2201,7 +2203,7 @@ window.updateAiFields = function(aiData, sh) {
         execBox.style.display = 'block';
     }
 
-    // ── Estrategia de Migración (Pilar 1 - Architect)
+    // ── Estrategia de Migración
     const strat = aiData?.migration_strategy;
     const stratBox = document.getElementById('strategy-box');
     if (strat && stratBox) {
@@ -2214,12 +2216,177 @@ window.updateAiFields = function(aiData, sh) {
         stratBox.style.display = 'block';
     }
 
-    // ── Sprints Plan (Pilar 1 - Architect)
+    // ── Quick Wins
+    const qwBox  = document.getElementById('qw-box');
+    const qwList = document.getElementById('qw-list');
+    if (aiData?.quick_wins?.length && qwBox && qwList) {
+        qwList.innerHTML = aiData.quick_wins.map(q => `
+            <div style="background:rgba(0,176,155,.06);border:1px solid rgba(0,176,155,.25);border-radius:10px;padding:.7rem 1rem;margin-bottom:.5rem">
+                <div style="display:flex;align-items:center;gap:.6rem;margin-bottom:.3rem;flex-wrap:wrap">
+                    <span style="font-weight:700;font-size:.82rem">${q.title || ''}</span>
+                    <span style="font-size:.65rem;color:var(--t2);background:rgba(0,0,0,.3);padding:.15rem .5rem;border-radius:10px">${q.effort || ''}</span>
+                    <span style="font-size:.65rem;color:var(--blue);margin-left:auto">${q.owner || ''}</span>
+                </div>
+                <div style="font-size:.75rem;color:var(--t2);margin-bottom:.2rem">${q.description || ''}</div>
+                ${q.risk_reduction ? `<div style="font-size:.7rem;color:var(--green)">▸ ${q.risk_reduction}</div>` : ''}
+            </div>`).join('');
+        qwBox.style.display = 'block';
+    }
+
+    // ── Sprints Plan
     const sp0 = aiData?.sprints?.sprint_0 || [];
     const sp1 = aiData?.sprints?.sprint_1 || [];
     const sp2 = aiData?.sprints?.sprint_2 || [];
     const sp3 = aiData?.sprints?.sprint_3 || [];
-    document.getElementById('plan').innerHTML = spB('SPRINT 0', sp0) + spB('SPRINT 1', sp1) + spB('SPRINT 2', sp2) + spB('SPRINT 3', sp3);
+    document.getElementById('plan').innerHTML = spB('SPRINT 0 — Análisis y Seguridad', sp0) + spB('SPRINT 1 — Contenedores y CI/CD', sp1) + spB('SPRINT 2 — Refactorización', sp2) + spB('SPRINT 3 — Corte a Cloud', sp3);
+
+    // SRE Steps legacy (p1)
+    const sreList = document.getElementById('sre');
+    if (sreList) sreList.innerHTML = sp0.map(s => `<li style="padding:.25rem 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:.78rem">${typeof s === 'string' ? s : s.title || String(s)}</li>`).join('');
+
+    // ── Análisis Detallado de Agentes
+    const agentBox     = document.getElementById('agent-box');
+    const agentSummary = document.getElementById('agent-summary');
+    if (aiData?.agent_analysis && agentBox && agentSummary) {
+        agentSummary.innerText = aiData.agent_analysis;
+        agentBox.style.display = 'block';
+    }
+
+    // ── Arquitectura Actual AS-IS
+    const currBox = document.getElementById('current-arch-box');
+    if (currBox) {
+        const currArch   = aiData?.current_architecture;
+        const scoreEl    = document.getElementById('coupling-score');
+        const analysisEl = document.getElementById('coupling-analysis');
+        const painEl     = document.getElementById('pain-points');
+        const score = currArch?.coupling_score ?? Math.min(10, 3 + (lastFindings.filter(f => f.sev === 'CRITICO').length) * 2);
+        const scoreColor = score >= 7 ? 'var(--red)' : score >= 4 ? 'var(--yellow)' : 'var(--green)';
+        if (scoreEl) { scoreEl.innerText = score; scoreEl.style.color = scoreColor; }
+        if (analysisEl && currArch?.coupling_analysis) analysisEl.innerText = currArch.coupling_analysis;
+        if (painEl && currArch?.pain_points?.length) {
+            painEl.innerHTML = currArch.pain_points.map(p => `<div style="font-size:.75rem;color:var(--red);padding:.2rem 0">▸ ${p}</div>`).join('');
+        }
+        currBox.style.display = 'block';
+    }
+
+    // ── Matriz de Riesgos
+    const riskBox  = document.getElementById('risk-box');
+    const riskBody = document.getElementById('risk-body');
+    if (aiData?.risk_matrix?.length && riskBox && riskBody) {
+        const probColor = p => p === 'Alta' ? 'var(--red)' : p === 'Media' ? 'var(--yellow)' : 'var(--green)';
+        const impColor  = i => i === 'Crítico' ? 'var(--red)' : i === 'Alto' ? 'var(--yellow)' : 'var(--blue)';
+        riskBody.innerHTML = aiData.risk_matrix.map(r => `
+            <tr style="border-bottom:1px solid rgba(255,255,255,.04)">
+                <td style="padding:.45rem .4rem;font-size:.75rem;font-weight:600">${r.risk || ''}</td>
+                <td style="padding:.45rem .4rem;text-align:center">
+                    ${r.cve && r.cve !== 'N/A'
+                        ? `<a href="https://nvd.nist.gov/vuln/detail/${r.cve}" target="_blank" rel="noopener" style="font-size:.65rem;color:var(--red);text-decoration:none;background:rgba(255,65,108,.15);padding:.1rem .35rem;border-radius:4px">${r.cve}</a>`
+                        : `<span style="font-size:.65rem;color:var(--t2)">—</span>`}
+                </td>
+                <td style="padding:.45rem .4rem;text-align:center;font-size:.72rem;font-weight:700;color:${probColor(r.probability)}">${r.probability || ''}</td>
+                <td style="padding:.45rem .4rem;text-align:center;font-size:.72rem;font-weight:700;color:${impColor(r.impact)}">${r.impact || ''}</td>
+                <td style="padding:.45rem .4rem;font-size:.72rem;color:var(--t2)">${r.mitigation || ''}</td>
+            </tr>`).join('');
+        riskBox.style.display = 'block';
+    }
+
+    // ── Remediación de Código
+    const remedBox  = document.getElementById('remed-box');
+    const remedList = document.getElementById('remed-list');
+    if (aiData?.code_remediation?.length && remedBox && remedList) {
+        const priColor = p => p?.startsWith('P1') ? 'var(--red)' : p?.startsWith('P2') ? 'var(--yellow)' : 'var(--blue)';
+        remedList.innerHTML = aiData.code_remediation.map(r => `
+            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:10px;padding:.8rem 1rem">
+                <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.4rem">
+                    <span style="font-weight:700;font-size:.82rem;color:var(--blue)">${r.file || ''}</span>
+                    ${r.priority ? `<span style="font-size:.62rem;font-weight:700;padding:.15rem .5rem;border-radius:10px;background:rgba(0,0,0,.4);color:${priColor(r.priority)};border:1px solid ${priColor(r.priority)}">${r.priority}</span>` : ''}
+                    ${r.effort ? `<span style="font-size:.62rem;color:var(--t2);margin-left:auto">${r.effort}</span>` : ''}
+                </div>
+                <div style="font-size:.78rem;color:#e0e0e0;margin-bottom:.3rem"><b>Problema:</b> ${r.issue || ''}</div>
+                <div style="font-size:.78rem;color:var(--green);margin-bottom:.3rem"><b>Acción:</b> ${r.action || ''}</div>
+                ${r.before ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-top:.4rem">
+                    <div><div style="font-size:.6rem;color:var(--red);margin-bottom:.2rem">ANTES</div><pre style="font-size:.65rem;max-height:80px;overflow:auto">${r.before}</pre></div>
+                    <div><div style="font-size:.6rem;color:var(--green);margin-bottom:.2rem">DESPUÉS</div>${r.after ? `<pre style="font-size:.65rem;max-height:80px;overflow:auto">${r.after}</pre>` : '<div style="font-size:.65rem;color:var(--t2);font-style:italic;padding:.5rem;background:rgba(0,0,0,.2);border-radius:4px">Acción: elimina código.</div>'}</div>
+                </div>` : ''}
+                ${r.benefit ? `<div style="font-size:.72rem;color:var(--t2);margin-top:.3rem;border-top:1px solid var(--bdr);padding-top:.3rem">${r.benefit}</div>` : ''}
+            </div>`).join('');
+        remedBox.style.display = 'block';
+    }
+
+    // ── Java Findings (CVEs)
+    const jfBox  = document.getElementById('java-findings-box');
+    const jfList = document.getElementById('java-findings-list');
+    if (aiData?.java_findings?.length && jfBox && jfList) {
+        const sevColor = s => s === 'CRITICO' ? 'var(--red)' : s === 'ALTO' ? '#ff9f43' : s === 'MEDIO' ? 'var(--yellow)' : 'var(--t2)';
+        jfList.innerHTML = aiData.java_findings.map(f => `
+            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:8px;padding:.6rem .9rem;display:flex;flex-wrap:wrap;gap:.5rem;align-items:flex-start">
+                <span style="font-size:.65rem;font-weight:700;padding:.15rem .5rem;border-radius:8px;background:rgba(0,0,0,.4);color:${sevColor(f.severity)};border:1px solid ${sevColor(f.severity)};white-space:nowrap">${f.severity || ''}</span>
+                <div style="flex:1;min-width:0">
+                    <div style="font-weight:700;font-size:.8rem;color:var(--blue)">${f.component || ''}${f.version ? ` <span style="font-size:.68rem;color:var(--t2);font-weight:400">v${f.version}</span>` : ''}</div>
+                    <div style="font-size:.75rem;color:#ddd;margin-top:.2rem">${f.issue || ''}</div>
+                    ${f.recommendation ? `<div style="font-size:.72rem;color:var(--green);margin-top:.2rem">→ ${f.recommendation}</div>` : ''}
+                </div>
+                ${f.cve && f.cve !== 'N/A' ? `<a href="https://nvd.nist.gov/vuln/detail/${f.cve}" target="_blank" rel="noopener" style="font-size:.62rem;color:var(--red);text-decoration:none;background:rgba(255,65,108,.15);padding:.15rem .45rem;border-radius:4px;white-space:nowrap;align-self:flex-start">${f.cve}</a>` : ''}
+            </div>`).join('');
+        jfBox.style.display = 'block';
+    }
+
+    // ── Code Transformation (JEE → Spring Boot)
+    const ctBox  = document.getElementById('code-transform-box');
+    const ctList = document.getElementById('code-transform-list');
+    if (aiData?.code_transformation?.length && ctBox && ctList) {
+        ctList.innerHTML = aiData.code_transformation.map(t => `
+            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:10px;padding:.8rem 1rem">
+                <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.4rem">
+                    <span style="font-weight:700;font-size:.82rem;color:var(--blue)">${t.class_name || ''}</span>
+                    ${t.effort_days ? `<span style="font-size:.62rem;color:var(--t2);margin-left:auto">${t.effort_days}d</span>` : ''}
+                </div>
+                <div style="font-size:.72rem;color:var(--t2);margin-bottom:.3rem">
+                    <span style="color:var(--red)">${t.current_pattern || ''}</span> → <span style="color:var(--green)">${t.target_pattern || ''}</span>
+                </div>
+                ${t.why ? `<div style="font-size:.75rem;color:#ddd;margin-bottom:.4rem">${t.why}</div>` : ''}
+                ${t.before ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-top:.4rem">
+                    <div><div style="font-size:.6rem;color:var(--red);margin-bottom:.2rem">ANTES (JEE)</div><pre style="font-size:.64rem;max-height:120px;overflow:auto;background:rgba(255,65,108,.05);border:1px solid rgba(255,65,108,.2);padding:.4rem;border-radius:4px">${t.before}</pre></div>
+                    <div><div style="font-size:.6rem;color:var(--green);margin-bottom:.2rem">DESPUES (Spring Boot)</div><pre style="font-size:.64rem;max-height:120px;overflow:auto;background:rgba(0,255,150,.05);border:1px solid rgba(0,255,150,.2);padding:.4rem;border-radius:4px">${t.after || ''}</pre></div>
+                </div>` : ''}
+                ${t.dependencies_to_add?.length ? `<div style="font-size:.68rem;color:var(--green);margin-top:.3rem">+ ${t.dependencies_to_add.join(', ')}</div>` : ''}
+                ${t.dependencies_to_remove?.length ? `<div style="font-size:.68rem;color:var(--red)">- ${t.dependencies_to_remove.join(', ')}</div>` : ''}
+            </div>`).join('');
+        ctBox.style.display = 'block';
+    }
+
+    // ── SQL Analysis
+    const sqlBox  = document.getElementById('sql-analysis-box');
+    const sqlList = document.getElementById('sql-analysis-list');
+    if (aiData?.sql_analysis?.length && sqlBox && sqlList) {
+        sqlList.innerHTML = aiData.sql_analysis.map(s => `
+            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:8px;padding:.6rem .9rem">
+                ${s.class ? `<div style="font-size:.68rem;color:var(--blue);margin-bottom:.3rem;font-weight:600">${s.class}</div>` : ''}
+                <pre style="font-size:.66rem;background:rgba(255,200,0,.05);border:1px solid rgba(255,200,0,.2);padding:.4rem;border-radius:4px;margin-bottom:.3rem;overflow:auto;max-height:60px">${s.query || ''}</pre>
+                ${s.jpa_equivalent ? `<div style="font-size:.7rem;color:var(--green)">JPA: <code style="background:rgba(0,255,150,.1);padding:.1rem .3rem;border-radius:3px">${s.jpa_equivalent}</code></div>` : ''}
+                ${s.recommendation ? `<div style="font-size:.7rem;color:var(--t2);margin-top:.2rem">${s.recommendation}</div>` : ''}
+            </div>`).join('');
+        sqlBox.style.display = 'block';
+    }
+
+    // ── Externalization
+    const extBox  = document.getElementById('externalization-box');
+    const extList = document.getElementById('externalization-list');
+    if (aiData?.externalization?.length && extBox && extList) {
+        extList.innerHTML = aiData.externalization.map(e => `
+            <div style="background:rgba(0,0,0,.25);border:1px solid var(--bdr);border-radius:8px;padding:.55rem .85rem;display:flex;flex-wrap:wrap;gap:.5rem;align-items:flex-start">
+                <span style="font-size:.62rem;font-weight:700;padding:.12rem .45rem;border-radius:6px;background:rgba(0,163,255,.15);color:var(--blue);white-space:nowrap">${e.type || ''}</span>
+                <div style="flex:1;min-width:0">
+                    <div style="font-size:.74rem;color:#ddd">${e.found_in || ''} ${e.current_value ? `<code style="font-size:.65rem;color:var(--yellow);background:rgba(255,200,0,.1);padding:.1rem .3rem;border-radius:3px">${e.current_value}</code>` : ''}</div>
+                    ${e.target ? `<div style="font-size:.7rem;color:var(--green);margin-top:.15rem">→ ${e.target}</div>` : ''}
+                    ${e.how ? `<div style="font-size:.68rem;color:var(--t2);margin-top:.1rem">${e.how}</div>` : ''}
+                </div>
+            </div>`).join('');
+        extBox.style.display = 'block';
+    }
+
+    // ── CloudNative Agent — Dockerfile, K8s, Terraform, etc.
+    _renderCloudNative(aiData?.cloudnative);
 
     // ── SRE Pilar — Healthchecks, 12-Factor, Runbooks
     _renderSre(aiData?.cloudnative);
