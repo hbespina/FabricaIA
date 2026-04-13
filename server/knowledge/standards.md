@@ -1,4 +1,4 @@
-# Estándares de Modernización - OTSOrchestrAI
+# Estándares de Modernización - La Fábrica
 
 Este documento es el cerebro de los agentes de modernización. Cualquier cambio aquí será aprendido por la IA en el siguiente análisis.
 

@@ -1,7 +1,7 @@
 {
-  "name": "modernization-factory-portal",
-  "version": "2.0.0",
-  "description": "Enterprise platform for legacy system modernization analysis and AWS migration planning",
+  "name": "la-fabrica-modernization",
+  "version": "5.2.0",
+  "description": "Célula de Modernización Agéntica — La Fábrica",
   "main": "backend-node.js",
   "type": "module",
   "scripts": {
@@ -18,7 +18,7 @@
     "SRE",
     "infrastructure-as-code"
   ],
-  "author": "OTSOrchestrAI",
+  "author": "La Fábrica Modernization Squad",
   "license": "MIT",
   "dependencies": {
     "cors": "^2.8.6",

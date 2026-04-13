@@ -93,6 +93,13 @@ echo "JAVA_HOME: $JAVA_HOME"
 java -version 2>&1
 which javac >/dev/null && javac -version 2>&1 || echo "javac: not found"
 echo "TOMCAT_HOME: $CATALINA_HOME"
+# Versión explícita de Tomcat para detección confiable
+if [ -n "$CATALINA_HOME" ] && [ -x "$CATALINA_HOME/bin/catalina.sh" ]; then
+    TOMCAT_VER=$("$CATALINA_HOME/bin/catalina.sh" version 2>/dev/null | grep -E "Server version:|Apache Tomcat" | head -1)
+    echo "TOMCAT_VERSION: ${TOMCAT_VER:-$(basename "$CATALINA_HOME")}"
+elif [ -n "$CATALINA_HOME" ]; then
+    echo "TOMCAT_VERSION: $(basename "$CATALINA_HOME")"
+fi
 echo "JBOSS_HOME: $JBOSS_HOME"
 
 echo "--- NODE/PYTHON/PHP RUNTIME ---"
@@ -216,7 +223,7 @@ done
 
 echo "--- CRITICAL ENTERPRISE MIDDLEWARE ---"
 echo "WEBSPHERE_DETECTED: $(timeout 3 find /opt/IBM -maxdepth 3 -name 'server.xml' 2>/dev/null | wc -l || echo "0") servers"
-echo "JBOSS_DETECTED: $(pgrep -f 'jboss|wildfly' 2>/dev/null | wc -l) instances"
+echo "JBOSS_DETECTED: $(pgrep -f 'jboss-modules\.jar\|org\.jboss\.as\.standalone\|standalone\.sh\|standalone\.bat' 2>/dev/null | wc -l) instances"
 echo "INFORMATICA_DETECTED: $(timeout 3 find /opt -maxdepth 2 -type d -name '*infa*' 2>/dev/null | wc -l || echo "0") installations"
 
 echo "--- CRITICAL CONFIG FILES (CONTENT SAMPLED) ---"

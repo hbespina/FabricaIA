@@ -954,7 +954,7 @@ async function _renderMermaid(el, aiRaw, generated) {
 }
 
 window.sw = function(i) {
-  // Hide all numeric pages p0-p5
+  // Hide all numeric pages p0-p5 (Resumen, Arquitectura, Código, IaC, SRE, FinOps)
   for(let j=0; j<6; j++) {
       let pg = document.getElementById('p'+j);
       let t = document.getElementById('n'+j);
@@ -962,27 +962,27 @@ window.sw = function(i) {
       if(t) t.classList.remove('on');
   }
   // Hide special pages
-  ['p-lab','p-sre','p-finops'].forEach(id => {
+  ['p-lab','p-hist','p-dash'].forEach(id => {
       const el = document.getElementById(id);
       if(el) el.style.display='none';
   });
-  ['n-lab','n-sre','n-finops'].forEach(id => {
+  ['n-lab','n-hist','n-dash'].forEach(id => {
       const el = document.getElementById(id);
       if(el) el.classList.remove('on');
   });
 
-  const specialMap = { lab: 'p-lab', sre: 'p-sre', finops: 'p-finops' };
+  const specialMap = { lab: 'p-lab', hist: 'p-hist', dash: 'p-dash' };
   const pageId = specialMap[i] !== undefined ? specialMap[i] : 'p'+i;
-  const navId  = (i === 'lab' || i === 'sre' || i === 'finops') ? 'n-'+i : 'n'+i;
+  const navId  = (i === 'lab' || i === 'hist' || i === 'dash') ? 'n-'+i : 'n'+i;
 
   let p = document.getElementById(pageId);
   let n = document.getElementById(navId);
   if(p) p.style.display='block';
   if(n) n.classList.add('on');
 
-  if(i === 4 && window.fetchHistory) window.fetchHistory();
-  if(i === 5 && window.loadDashboard) { window.loadDashboard(); window.loadPortfolio(); }
-  if(i === 'finops' && typeof loadFinOps === 'function' && window.lastScanId) loadFinOps();
+  if(i === 'hist' && window.fetchHistory) window.fetchHistory();
+  if(i === 'dash' && window.loadDashboard) { window.loadDashboard(); window.loadPortfolio(); }
+  if(i === 5 && typeof loadFinOps === 'function' && window.lastScanId) loadFinOps();
 
   if (i === 0 || i === 1 || i === 2) {
       setTimeout(() => window.triggerMermaid(), 50);
@@ -1345,6 +1345,14 @@ function _showCacheModal(ageMinutes, filePath) {
         mo.style.display = 'flex';
     });
 }
+
+
+window.togglePass = function(id) {
+    const el = document.getElementById(id);
+    if (el) {
+        el.type = el.type === 'password' ? 'text' : 'password';
+    }
+};
 
 window.connectAndCollect = async function() {
     const host = document.getElementById('ssh-host').value.trim();
@@ -2138,6 +2146,37 @@ function _renderSre(cn) {
     let hasContent = false;
     const emptyEl = document.getElementById('sre-empty');
 
+    // SRE Mermaid TO-BE (Focus)
+    const sreMermaid = document.getElementById('sre-mermaid');
+    if (sreMermaid && cn.to_be_diagram) {
+        const raw = cn.to_be_diagram.replace(/\\n/g, '\n');
+        sreMermaid.removeAttribute('data-processed');
+        sreMermaid.innerText = raw;
+        if (window.mermaid) {
+            try { window.mermaid.init(undefined, sreMermaid); } catch(e) { console.warn('[Mermaid SRE]', e); }
+        }
+        hasContent = true;
+    }
+
+    // SRE Steps Checklist
+    const sreList = document.getElementById('sre');
+    if (sreList) {
+        const steps = [
+            'Configurar Health Probes (Liveness/Readiness)',
+            'Implementar Exporter de Métricas (Prometheus)',
+            'Definir Límites de Recursos (CPU/Memory)',
+            'Establecer Políticas de Reintento y Timeout',
+            'Configurar Alertas de Latencia y Disponibilidad',
+            'Automatizar Backup de Datos Críticos'
+        ];
+        sreList.innerHTML = steps.map(s => `
+            <li style="display:flex;align-items:center;gap:.6rem;padding:.3rem 0;color:#ddd;border-bottom:1px solid rgba(255,255,255,.05)">
+                <span style="color:var(--green)">⚡</span>
+                <span>${s}</span>
+            </li>`).join('');
+        hasContent = true;
+    }
+
     // Healthchecks
     const healthBox  = document.getElementById('sre-health-box');
     const healthCont = document.getElementById('sre-health-content');
@@ -2191,97 +2230,32 @@ function _renderSre(cn) {
     if (hasContent && emptyEl) emptyEl.style.display = 'none';
 }
 
-window.updateAiFields = function(aiData, sh) {
-    lastAiData = aiData;
-    lastSh = sh;
-
-    // ── Resumen Ejecutivo
-    const execBox  = document.getElementById('exec-box');
-    const execSum  = document.getElementById('exec-summary');
-    if (aiData?.executive_summary && execBox && execSum) {
-        execSum.innerText = aiData.executive_summary;
-        execBox.style.display = 'block';
+// ─── Modular Render Helpers ───────────────────────────────────────────────────
+function _renderDiscovery(d) {
+    if (!d) return;
+    const scores = { 'srisk': d.risk_score, 'scve': d.cve_count, 'sread': d.readiness_score };
+    for (const [id, val] of Object.entries(scores)) {
+        const el = document.getElementById(id);
+        if (el) el.innerText = val || '-';
     }
+    const ssum = document.getElementById('ssum');
+    if (ssum) ssum.innerText = d.server_summary || '';
+    const inv = document.getElementById('inv');
+    if (inv) inv.innerText = d.inventory_summary || '';
+}
 
-    // ── Estrategia de Migración
-    const strat = aiData?.migration_strategy;
-    const stratBox = document.getElementById('strategy-box');
-    if (strat && stratBox) {
-        const badge = document.getElementById('strategy-badge');
-        const rationale = document.getElementById('strategy-rationale');
-        const timeline = document.getElementById('strategy-timeline');
-        if (badge) badge.innerText = (strat.approach || '').toUpperCase();
-        if (rationale) rationale.innerText = strat.rationale || '';
-        if (timeline) timeline.innerText = strat.total_weeks ? `${strat.total_weeks} semanas · ${strat.phases || 4} fases · ${strat.target_runtime || 'ECS Fargate'}` : '';
-        stratBox.style.display = 'block';
-    }
-
-    // ── Quick Wins
-    const qwBox  = document.getElementById('qw-box');
-    const qwList = document.getElementById('qw-list');
-    if (aiData?.quick_wins?.length && qwBox && qwList) {
-        qwList.innerHTML = aiData.quick_wins.map(q => `
-            <div style="background:rgba(0,176,155,.06);border:1px solid rgba(0,176,155,.25);border-radius:10px;padding:.7rem 1rem;margin-bottom:.5rem">
-                <div style="display:flex;align-items:center;gap:.6rem;margin-bottom:.3rem;flex-wrap:wrap">
-                    <span style="font-weight:700;font-size:.82rem">${q.title || ''}</span>
-                    <span style="font-size:.65rem;color:var(--t2);background:rgba(0,0,0,.3);padding:.15rem .5rem;border-radius:10px">${q.effort || ''}</span>
-                    <span style="font-size:.65rem;color:var(--blue);margin-left:auto">${q.owner || ''}</span>
-                </div>
-                <div style="font-size:.75rem;color:var(--t2);margin-bottom:.2rem">${q.description || ''}</div>
-                ${q.risk_reduction ? `<div style="font-size:.7rem;color:var(--green)">▸ ${q.risk_reduction}</div>` : ''}
-            </div>`).join('');
-        qwBox.style.display = 'block';
-    }
-
-    // ── Sprints Plan
-    const sp0 = aiData?.sprints?.sprint_0 || [];
-    const sp1 = aiData?.sprints?.sprint_1 || [];
-    const sp2 = aiData?.sprints?.sprint_2 || [];
-    const sp3 = aiData?.sprints?.sprint_3 || [];
-    document.getElementById('plan').innerHTML = spB('SPRINT 0 — Análisis y Seguridad', sp0) + spB('SPRINT 1 — Contenedores y CI/CD', sp1) + spB('SPRINT 2 — Refactorización', sp2) + spB('SPRINT 3 — Corte a Cloud', sp3);
-
-    // SRE Steps legacy (p1)
-    const sreList = document.getElementById('sre');
-    if (sreList) sreList.innerHTML = sp0.map(s => `<li style="padding:.25rem 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:.78rem">${typeof s === 'string' ? s : s.title || String(s)}</li>`).join('');
-
-    // ── Análisis Detallado de Agentes
-    const agentBox     = document.getElementById('agent-box');
-    const agentSummary = document.getElementById('agent-summary');
-    if (aiData?.agent_analysis && agentBox && agentSummary) {
-        agentSummary.innerText = aiData.agent_analysis;
-        agentBox.style.display = 'block';
-    }
-
-    // ── Arquitectura Actual AS-IS
-    const currBox = document.getElementById('current-arch-box');
-    if (currBox) {
-        const currArch   = aiData?.current_architecture;
-        const scoreEl    = document.getElementById('coupling-score');
-        const analysisEl = document.getElementById('coupling-analysis');
-        const painEl     = document.getElementById('pain-points');
-        const score = currArch?.coupling_score ?? Math.min(10, 3 + (lastFindings.filter(f => f.sev === 'CRITICO').length) * 2);
-        const scoreColor = score >= 7 ? 'var(--red)' : score >= 4 ? 'var(--yellow)' : 'var(--green)';
-        if (scoreEl) { scoreEl.innerText = score; scoreEl.style.color = scoreColor; }
-        if (analysisEl && currArch?.coupling_analysis) analysisEl.innerText = currArch.coupling_analysis;
-        if (painEl && currArch?.pain_points?.length) {
-            painEl.innerHTML = currArch.pain_points.map(p => `<div style="font-size:.75rem;color:var(--red);padding:.2rem 0">▸ ${p}</div>`).join('');
-        }
-        currBox.style.display = 'block';
-    }
-
-    // ── Matriz de Riesgos
-    const riskBox  = document.getElementById('risk-box');
+function _renderRiskAndStrategy(ai) {
+    // Risks
     const riskBody = document.getElementById('risk-body');
-    if (aiData?.risk_matrix?.length && riskBox && riskBody) {
-        const probColor = p => p === 'Alta' ? 'var(--red)' : p === 'Media' ? 'var(--yellow)' : 'var(--green)';
-        const impColor  = i => i === 'Crítico' ? 'var(--red)' : i === 'Alto' ? 'var(--yellow)' : 'var(--blue)';
-        riskBody.innerHTML = aiData.risk_matrix.map(r => `
-            <tr style="border-bottom:1px solid rgba(255,255,255,.04)">
+    const riskBox = document.getElementById('risk-box');
+    if (ai?.risks?.length && riskBody && riskBox) {
+        const probColor = p => p === 'ALTA' ? 'var(--red)' : p === 'MEDIA' ? 'var(--yellow)' : 'var(--green)';
+        const impColor  = i => i === 'ALTO' ? 'var(--red)' : i === 'MEDIO' ? 'var(--yellow)' : 'var(--green)';
+        riskBody.innerHTML = ai.risks.map(r => `
+            <tr style="border-bottom:1px solid rgba(255,255,255,.05)">
                 <td style="padding:.45rem .4rem;font-size:.75rem;font-weight:600">${r.risk || ''}</td>
                 <td style="padding:.45rem .4rem;text-align:center">
-                    ${r.cve && r.cve !== 'N/A'
-                        ? `<a href="https://nvd.nist.gov/vuln/detail/${r.cve}" target="_blank" rel="noopener" style="font-size:.65rem;color:var(--red);text-decoration:none;background:rgba(255,65,108,.15);padding:.1rem .35rem;border-radius:4px">${r.cve}</a>`
-                        : `<span style="font-size:.65rem;color:var(--t2)">—</span>`}
+                    ${r.cve && r.cve !== 'N/A' ? `<a href="https://nvd.nist.gov/vuln/detail/${r.cve}" target="_blank" rel="noopener" style="font-size:.65rem;color:var(--red);text-decoration:none;background:rgba(255,65,108,.15);padding:.1rem .35rem;border-radius:4px">${r.cve}</a>` : '<span style="font-size:.65rem;color:var(--t2)">—</span>'}
                 </td>
                 <td style="padding:.45rem .4rem;text-align:center;font-size:.72rem;font-weight:700;color:${probColor(r.probability)}">${r.probability || ''}</td>
                 <td style="padding:.45rem .4rem;text-align:center;font-size:.72rem;font-weight:700;color:${impColor(r.impact)}">${r.impact || ''}</td>
@@ -2290,111 +2264,125 @@ window.updateAiFields = function(aiData, sh) {
         riskBox.style.display = 'block';
     }
 
-    // ── Remediación de Código
-    const remedBox  = document.getElementById('remed-box');
+    // Strategy
+    const strat = ai?.migration_strategy;
+    const stratBox = document.getElementById('strategy-box');
+    if (strat && stratBox) {
+        const badge = document.getElementById('strategy-badge');
+        const rationale = document.getElementById('strategy-rationale');
+        const timeline = document.getElementById('strategy-timeline');
+        if (badge) badge.innerText = (strat.approach || '').toUpperCase();
+        if (rationale) rationale.innerText = strat.rationale || '';
+        if (timeline) timeline.innerText = strat.total_weeks ? `${strat.total_weeks} semanas · ${strat.phases || 4} fases` : '';
+        stratBox.style.display = 'block';
+    }
+
+    // TO-BE Diagram (Arquitectura)
+    const im = document.getElementById('im');
+    const cn = ai?.cloudnative;
+    if (im && cn?.to_be_diagram) {
+        const raw = cn.to_be_diagram.replace(/\\n/g, '\n');
+        im.removeAttribute('data-processed');
+        im.innerText = raw;
+        if (window.mermaid) {
+            try { window.mermaid.init(undefined, im); } catch(e) { console.warn('[Mermaid Architecture]', e); }
+        }
+    }
+}
+
+function _renderCodeRemediations(ai) {
+    // Quick Wins
+    const qwBox = document.getElementById('qw-box');
+    const qwList = document.getElementById('qw-list');
+    if (ai?.quick_wins?.length && qwBox && qwList) {
+        qwList.innerHTML = ai.quick_wins.map(q => `
+            <div style="background:rgba(0,163,255,.05);border:1px solid rgba(0,163,255,.2);border-radius:8px;padding:.6rem .9rem;margin-bottom:.4rem">
+                <div style="font-weight:700;font-size:.78rem;color:var(--blue)">${q.title || ''}</div>
+                <div style="font-size:.71rem;color:#ddd;margin-top:.15rem">${q.action || ''}</div>
+            </div>`).join('');
+        qwBox.style.display = 'block';
+    }
+
+    // Code Remediation
+    const remedBox = document.getElementById('remed-box');
     const remedList = document.getElementById('remed-list');
-    if (aiData?.code_remediation?.length && remedBox && remedList) {
-        const priColor = p => p?.startsWith('P1') ? 'var(--red)' : p?.startsWith('P2') ? 'var(--yellow)' : 'var(--blue)';
-        remedList.innerHTML = aiData.code_remediation.map(r => `
-            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:10px;padding:.8rem 1rem">
-                <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.4rem">
-                    <span style="font-weight:700;font-size:.82rem;color:var(--blue)">${r.file || ''}</span>
-                    ${r.priority ? `<span style="font-size:.62rem;font-weight:700;padding:.15rem .5rem;border-radius:10px;background:rgba(0,0,0,.4);color:${priColor(r.priority)};border:1px solid ${priColor(r.priority)}">${r.priority}</span>` : ''}
-                    ${r.effort ? `<span style="font-size:.62rem;color:var(--t2);margin-left:auto">${r.effort}</span>` : ''}
-                </div>
-                <div style="font-size:.78rem;color:#e0e0e0;margin-bottom:.3rem"><b>Problema:</b> ${r.issue || ''}</div>
-                <div style="font-size:.78rem;color:var(--green);margin-bottom:.3rem"><b>Acción:</b> ${r.action || ''}</div>
-                ${r.before ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-top:.4rem">
-                    <div><div style="font-size:.6rem;color:var(--red);margin-bottom:.2rem">ANTES</div><pre style="font-size:.65rem;max-height:80px;overflow:auto">${r.before}</pre></div>
-                    <div><div style="font-size:.6rem;color:var(--green);margin-bottom:.2rem">DESPUÉS</div>${r.after ? `<pre style="font-size:.65rem;max-height:80px;overflow:auto">${r.after}</pre>` : '<div style="font-size:.65rem;color:var(--t2);font-style:italic;padding:.5rem;background:rgba(0,0,0,.2);border-radius:4px">Acción: elimina código.</div>'}</div>
-                </div>` : ''}
-                ${r.benefit ? `<div style="font-size:.72rem;color:var(--t2);margin-top:.3rem;border-top:1px solid var(--bdr);padding-top:.3rem">${r.benefit}</div>` : ''}
+    if (ai?.code_remediation?.length && remedBox && remedList) {
+        remedList.innerHTML = ai.code_remediation.map(r => `
+            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:10px;padding:.8rem">
+                <div style="font-weight:700;font-size:.8rem;color:var(--blue)">${r.file || ''}</div>
+                <div style="font-size:.75rem;color:#ddd"><b>Problema:</b> ${r.issue || ''}</div>
+                <div style="font-size:.75rem;color:var(--green)"><b>Acción:</b> ${r.action || ''}</div>
             </div>`).join('');
         remedBox.style.display = 'block';
     }
 
-    // ── Java Findings (CVEs)
-    const jfBox  = document.getElementById('java-findings-box');
+    // Java Findings
+    const jfBox = document.getElementById('java-findings-box');
     const jfList = document.getElementById('java-findings-list');
-    if (aiData?.java_findings?.length && jfBox && jfList) {
-        const sevColor = s => s === 'CRITICO' ? 'var(--red)' : s === 'ALTO' ? '#ff9f43' : s === 'MEDIO' ? 'var(--yellow)' : 'var(--t2)';
-        jfList.innerHTML = aiData.java_findings.map(f => `
-            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:8px;padding:.6rem .9rem;display:flex;flex-wrap:wrap;gap:.5rem;align-items:flex-start">
-                <span style="font-size:.65rem;font-weight:700;padding:.15rem .5rem;border-radius:8px;background:rgba(0,0,0,.4);color:${sevColor(f.severity)};border:1px solid ${sevColor(f.severity)};white-space:nowrap">${f.severity || ''}</span>
-                <div style="flex:1;min-width:0">
-                    <div style="font-weight:700;font-size:.8rem;color:var(--blue)">${f.component || ''}${f.version ? ` <span style="font-size:.68rem;color:var(--t2);font-weight:400">v${f.version}</span>` : ''}</div>
-                    <div style="font-size:.75rem;color:#ddd;margin-top:.2rem">${f.issue || ''}</div>
-                    ${f.recommendation ? `<div style="font-size:.72rem;color:var(--green);margin-top:.2rem">→ ${f.recommendation}</div>` : ''}
-                </div>
-                ${f.cve && f.cve !== 'N/A' ? `<a href="https://nvd.nist.gov/vuln/detail/${f.cve}" target="_blank" rel="noopener" style="font-size:.62rem;color:var(--red);text-decoration:none;background:rgba(255,65,108,.15);padding:.15rem .45rem;border-radius:4px;white-space:nowrap;align-self:flex-start">${f.cve}</a>` : ''}
+    if (ai?.java_findings?.length && jfBox && jfList) {
+        jfList.innerHTML = ai.java_findings.map(f => `
+            <div style="padding:.5rem;background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:8px;margin-bottom:.4rem">
+                <div style="font-weight:700;font-size:.78rem;color:var(--red)">${f.component || ''}</div>
+                <div style="font-size:.72rem;color:var(--t2)">${f.issue || ''}</div>
             </div>`).join('');
         jfBox.style.display = 'block';
     }
 
-    // ── Code Transformation (JEE → Spring Boot)
-    const ctBox  = document.getElementById('code-transform-box');
-    const ctList = document.getElementById('code-transform-list');
-    if (aiData?.code_transformation?.length && ctBox && ctList) {
-        ctList.innerHTML = aiData.code_transformation.map(t => `
-            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:10px;padding:.8rem 1rem">
-                <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.4rem">
-                    <span style="font-weight:700;font-size:.82rem;color:var(--blue)">${t.class_name || ''}</span>
-                    ${t.effort_days ? `<span style="font-size:.62rem;color:var(--t2);margin-left:auto">${t.effort_days}d</span>` : ''}
-                </div>
-                <div style="font-size:.72rem;color:var(--t2);margin-bottom:.3rem">
-                    <span style="color:var(--red)">${t.current_pattern || ''}</span> → <span style="color:var(--green)">${t.target_pattern || ''}</span>
-                </div>
-                ${t.why ? `<div style="font-size:.75rem;color:#ddd;margin-bottom:.4rem">${t.why}</div>` : ''}
-                ${t.before ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-top:.4rem">
-                    <div><div style="font-size:.6rem;color:var(--red);margin-bottom:.2rem">ANTES (JEE)</div><pre style="font-size:.64rem;max-height:120px;overflow:auto;background:rgba(255,65,108,.05);border:1px solid rgba(255,65,108,.2);padding:.4rem;border-radius:4px">${t.before}</pre></div>
-                    <div><div style="font-size:.6rem;color:var(--green);margin-bottom:.2rem">DESPUES (Spring Boot)</div><pre style="font-size:.64rem;max-height:120px;overflow:auto;background:rgba(0,255,150,.05);border:1px solid rgba(0,255,150,.2);padding:.4rem;border-radius:4px">${t.after || ''}</pre></div>
-                </div>` : ''}
-                ${t.dependencies_to_add?.length ? `<div style="font-size:.68rem;color:var(--green);margin-top:.3rem">+ ${t.dependencies_to_add.join(', ')}</div>` : ''}
-                ${t.dependencies_to_remove?.length ? `<div style="font-size:.68rem;color:var(--red)">- ${t.dependencies_to_remove.join(', ')}</div>` : ''}
-            </div>`).join('');
-        ctBox.style.display = 'block';
-    }
-
-    // ── SQL Analysis
-    const sqlBox  = document.getElementById('sql-analysis-box');
+    // SQL Analysis
+    const sqlBox = document.getElementById('sql-analysis-box');
     const sqlList = document.getElementById('sql-analysis-list');
-    if (aiData?.sql_analysis?.length && sqlBox && sqlList) {
-        sqlList.innerHTML = aiData.sql_analysis.map(s => `
-            <div style="background:rgba(0,0,0,.3);border:1px solid var(--bdr);border-radius:8px;padding:.6rem .9rem">
-                ${s.class ? `<div style="font-size:.68rem;color:var(--blue);margin-bottom:.3rem;font-weight:600">${s.class}</div>` : ''}
-                <pre style="font-size:.66rem;background:rgba(255,200,0,.05);border:1px solid rgba(255,200,0,.2);padding:.4rem;border-radius:4px;margin-bottom:.3rem;overflow:auto;max-height:60px">${s.query || ''}</pre>
-                ${s.jpa_equivalent ? `<div style="font-size:.7rem;color:var(--green)">JPA: <code style="background:rgba(0,255,150,.1);padding:.1rem .3rem;border-radius:3px">${s.jpa_equivalent}</code></div>` : ''}
-                ${s.recommendation ? `<div style="font-size:.7rem;color:var(--t2);margin-top:.2rem">${s.recommendation}</div>` : ''}
-            </div>`).join('');
+    if (ai?.sql_analysis?.length && sqlBox && sqlList) {
+        sqlList.innerHTML = ai.sql_analysis.map(s => `<pre style="font-size:.65rem;background:rgba(0,0,0,.4);padding:.5rem;border-radius:6px;margin-bottom:.4rem">${s.sql_query || ''}</pre>`).join('');
         sqlBox.style.display = 'block';
     }
+}
 
-    // ── Externalization
-    const extBox  = document.getElementById('externalization-box');
-    const extList = document.getElementById('externalization-list');
-    if (aiData?.externalization?.length && extBox && extList) {
-        extList.innerHTML = aiData.externalization.map(e => `
-            <div style="background:rgba(0,0,0,.25);border:1px solid var(--bdr);border-radius:8px;padding:.55rem .85rem;display:flex;flex-wrap:wrap;gap:.5rem;align-items:flex-start">
-                <span style="font-size:.62rem;font-weight:700;padding:.12rem .45rem;border-radius:6px;background:rgba(0,163,255,.15);color:var(--blue);white-space:nowrap">${e.type || ''}</span>
-                <div style="flex:1;min-width:0">
-                    <div style="font-size:.74rem;color:#ddd">${e.found_in || ''} ${e.current_value ? `<code style="font-size:.65rem;color:var(--yellow);background:rgba(255,200,0,.1);padding:.1rem .3rem;border-radius:3px">${e.current_value}</code>` : ''}</div>
-                    ${e.target ? `<div style="font-size:.7rem;color:var(--green);margin-top:.15rem">→ ${e.target}</div>` : ''}
-                    ${e.how ? `<div style="font-size:.68rem;color:var(--t2);margin-top:.1rem">${e.how}</div>` : ''}
-                </div>
-            </div>`).join('');
-        extBox.style.display = 'block';
+window.updateAiFields = function(aiData, sh) {
+    lastAiData = aiData;
+    lastSh = sh;
+
+    
+    // Reset visibility of special content boxes
+    const specialBoxes = [
+        'exec-box', 'pm-priority-box', 'risk-box', 'strategy-box', 
+        'dba-box', 'qw-box', 'remed-box', 'java-findings-box',
+        'code-transform-box', 'sql-analysis-box', 'externalization-box',
+        'java-container-box', 'iac-validation-panel', 'pricing-panel',
+        'sre-health-box', 'sre-12factor-box', 'sre-runbook-box',
+        'finops-business-box', 'finops-tabs-box',
+        'artifact-deep-analysis-row'
+    ];
+    specialBoxes.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = 'none';
+    });
+
+    // ── Deep Artifact Analysis (Pilar 2)
+    if (aiData?.artifact_inventory) {
+        _renderArtifactDeepAnalysis(aiData.artifact_inventory);
     }
 
-    // ── CloudNative Agent — Dockerfile, K8s, Terraform, etc.
+
+    // ── Pilar 0: Resumen (PM)
+    _renderPm(aiData?.pm);
+
+    // ── Pilar 1: Arquitectura (Discovery + DBA + TO-BE)
+    _renderDiscovery(aiData?.discovery); 
+    _renderDba(aiData?.dba_findings);
+    _renderRiskAndStrategy(aiData);
+
+    // ── Pilar 2: Código (Java + Security + SQL)
+    _renderCodeRemediations(aiData);
+
+    // ── Pilar 3: IaC (CloudNative Infrastructure)
     _renderCloudNative(aiData?.cloudnative);
 
-    // ── SRE Pilar — Healthchecks, 12-Factor, Runbooks
+    // ── Pilar 4: SRE (Health + 12Factor + Runbooks)
     _renderSre(aiData?.cloudnative);
 
-    // ── FinOps Pilar — TCO + CostOptimizationAgent
+    // ── Pilar 5: FinOps (Business + Optimization)
     _renderFinOpsAi(aiData?.business, aiData?.cost_optimization);
 
-    _renderIaC(lastDetectedTechs, lastHost);
     window.triggerMermaid();
 };
 
@@ -2491,6 +2479,130 @@ function _renderFinOpsAi(biz, costOpt) {
 }
 
 // ─── FinOps Pro Logic ─────────────────────────────────────────────────────────
+
+// ─── [SQUAD] DBA & PM Renderers ──────────────────────────────────────────────
+
+function _renderDba(dba) {
+    const box = document.getElementById('dba-box');
+    if (!box || !dba || !dba.database_modernization) return;
+
+    const dm = dba.database_modernization;
+    
+    // Engine Badge
+    const badge = document.getElementById('dba-engine-badge');
+    if (badge) badge.innerText = `${dm.current_stack || 'Legacy'} → ${dm.engine_migration || 'Aurora'}`;
+
+    // Strategy
+    const stratEl = document.getElementById('dba-strategy');
+    if (stratEl) stratEl.innerText = dm.logic_migration_strategy || '';
+
+    const toolEl  = document.getElementById('dba-tool');
+    if (toolEl) toolEl.innerText = `Herramienta Sugerida: ${dm.migration_tool || 'DMS'}`;
+
+    // PL/SQL Candidates
+    const plList = document.getElementById('dba-plsql-list');
+    if (plList && dba.plsql_refactor_candidates?.length) {
+        plList.innerHTML = dba.plsql_refactor_candidates.map(p => `
+            <div style="background:rgba(255,165,0,.05);border:1px solid rgba(255,165,0,.2);border-radius:6px;padding:.4rem;margin-bottom:.3rem">
+                <div style="display:flex;justify-content:space-between;font-size:.68rem;font-weight:700">
+                    <span style="color:var(--orange)">${p.name || ''}</span>
+                    <span style="color:var(--t2)">${p.complexity || ''}</span>
+                </div>
+                <div style="font-size:.62rem;color:#ddd;margin-top:.2rem">${p.recommendation || ''}</div>
+            </div>`).join('');
+    }
+
+    // Schema Changes
+    const scList = document.getElementById('dba-schema-list');
+    if (scList && dba.schema_changes?.length) {
+        scList.innerHTML = dba.schema_changes.map(s => `
+            <div style="display:flex;gap:.5rem;font-size:.7rem;padding:.2rem 0;border-bottom:1px solid rgba(255,150,0,.1)">
+                <b style="color:var(--orange);min-width:80px">${s.table_pattern || ''}</b>
+                <span style="flex:1">${s.change || ''}</span>
+                <span style="font-size:.6rem;color:var(--t2)">[${s.impact || ''}]</span>
+            </div>`).join('');
+    }
+
+    box.style.display = 'block';
+}
+
+
+function _renderArtifactDeepAnalysis(inv) {
+    if (!inv) return;
+    const row = document.getElementById('artifact-deep-analysis-row');
+    if (!row) return;
+
+    // Metadata
+    const metaCont = document.getElementById('artifact-metadata-content');
+    if (metaCont) {
+        const javaVer = (inv.match(/COMPILED_FOR:\s*([^\n]+)/) || [])[1] || 'Unknown';
+        const classes = (inv.match(/TOTAL_CLASSES:\s*(\d+)/) || [])[1] || '0';
+        const libs    = (inv.match(/DEPENDENCIAS \((\d+)/) || [])[1] || '0';
+        metaCont.innerHTML = `
+            <div style="margin-bottom:.3rem">☕ <b>Java Target:</b> ${javaVer}</div>
+            <div style="margin-bottom:.3rem">📄 <b>Clases:</b> ${classes}</div>
+            <div style="margin-bottom:.3rem">📚 <b>Librerías JAR:</b> ${libs}</div>
+        `;
+    }
+
+    // Patterns
+    const patCont = document.getElementById('artifact-patterns-content');
+    if (patCont) {
+        const patternsStr = (inv.match(/DETECTED_PATTERNS:\s*([^\n]+)/) || [])[1] || '';
+        const pats = patternsStr.split(',').map(p => p.trim()).filter(Boolean);
+        patCont.innerHTML = pats.map(p => `
+            <span style="font-size:.62rem;padding:.2rem .5rem;background:rgba(255,200,0,.1);color:var(--yellow);border:1px solid rgba(255,200,0,.3);border-radius:4px">${p}</span>
+        `).join('') || '<span style="color:var(--t2);font-size:.7rem italic">No se detectaron patrones JEE estándar.</span>';
+    }
+
+    // SQL
+    const sqlList = document.getElementById('artifact-sql-list');
+    if (sqlList) {
+        const sqlMatches = [...inv.matchAll(/SQL:\s*([^\n]+)/g)].map(m => m[1]);
+        sqlList.innerHTML = sqlMatches.map(sql => `
+            <div style="font-size:.65rem;background:rgba(0,0,0,.2);padding:.4rem;border-radius:4px;border:1px solid rgba(255,255,255,.05);color:var(--green);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${sql}">
+                <code>${sql}</code>
+            </div>
+        `).join('') || '<div style="color:var(--t2);font-size:.7rem italic">No se extrajo SQL del bytecode.</div>';
+    }
+
+    row.style.display = 'block';
+}
+
+function _renderPm(pm) {
+    const box = document.getElementById('pm-priority-box');
+    if (!box || !pm) return;
+
+    // Master Priorities
+    const list = document.getElementById('pm-priority-list');
+    if (list && pm.master_priorities?.length) {
+        list.innerHTML = pm.master_priorities.map(p => `
+            <div style="background:rgba(157,80,187,.08);border:1px solid rgba(157,80,187,.2);border-radius:10px;padding:.8rem">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.4rem">
+                    <div style="font-weight:700;font-size:.8rem;color:var(--purple)">${p.task || ''}</div>
+                    <span style="font-size:.6rem;background:rgba(0,0,0,.3);padding:.1rem .4rem;border-radius:5px;color:var(--purple)">SPRINT ${p.sprint || '0'}</span>
+                </div>
+                <div style="font-size:.72rem;color:#ddd;margin-bottom:.4rem">${p.rationale || ''}</div>
+                <div style="font-size:.65rem;color:var(--purple)">Impacto: ${p.impact || 'Alto'}</div>
+            </div>`).join('');
+    }
+
+    // Executive Summary consolidado
+    if (pm.executive_summary) {
+        const execSum = document.getElementById('exec-summary');
+        if (execSum) {
+            execSum.innerHTML = `<span style="border-left:3px solid var(--purple);padding-left:.8rem;display:block">${pm.executive_summary}</span>`;
+        }
+    }
+
+    // Coordination
+    const coordEl = document.getElementById('pm-coordination');
+    if (coordEl && pm.squad_coordination) {
+        coordEl.innerText = `Squad Coordination: ${pm.squad_coordination}`;
+    }
+
+    box.style.display = 'block';
+}
 
 window.loadFinOps = async function() {
     if (!lastScanId) return;

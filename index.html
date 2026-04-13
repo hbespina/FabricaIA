@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<title>Modernization Factory | Architect V3</title>
+<title>La Fábrica | Modernization Squad</title>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <script>
 mermaid.initialize({
@@ -86,12 +86,14 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
     <div style="text-align:center;font-size:1.05rem;font-weight:700;background:linear-gradient(135deg,#00d2ff,#9d50bb);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:.4rem">MODERNIZATION FACTORY</div>
     <div style="text-align:center;font-size:.65rem;color:var(--t2);margin-bottom:1.8rem">ARCHITECT V4 — Acceso Seguro</div>
     <div id="login-error" style="display:none;background:rgba(255,65,108,.1);border:1px solid var(--red);border-radius:8px;padding:.55rem;font-size:.75rem;color:var(--red);margin-bottom:.8rem"></div>
-    <label style="font-size:.68rem;color:var(--t2);display:block;margin-bottom:.3rem">Usuario</label>
-    <input id="login-user" type="text" placeholder="admin" style="width:100%;margin-bottom:.7rem" autocomplete="username">
-    <label style="font-size:.68rem;color:var(--t2);display:block;margin-bottom:.3rem">Contraseña</label>
-    <input id="login-pass" type="password" placeholder="••••••••" style="width:100%;margin-bottom:1.2rem"
-           autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
-    <button class="btn" style="width:100%;margin-top:0" onclick="doLogin()" id="login-btn">Ingresar</button>
+    <form id="login-form" onsubmit="event.preventDefault(); window.doLogin();">
+      <label style="font-size:.68rem;color:var(--t2);display:block;margin-bottom:.3rem">Usuario</label>
+      <input id="login-user" type="text" placeholder="admin" style="width:100%;margin-bottom:.7rem" autocomplete="username">
+      <label style="font-size:.68rem;color:var(--t2);display:block;margin-bottom:.3rem">Contraseña</label>
+      <input id="login-pass" type="password" placeholder="••••••••" style="width:100%;margin-bottom:1.2rem"
+             autocomplete="current-password">
+      <button class="btn" type="submit" style="width:100%;margin-top:0" id="login-btn">Ingresar</button>
+    </form>
   </div>
 </div>
 
@@ -204,16 +206,16 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
 
 <div class="app">
 <aside>
-  <div class="logo">MODERNIZATION FACTORY</div>
+  <div class="logo">LA FÁBRICA</div>
   <ul style="padding:0">
     <li class="navli on" id="n0" onclick="sw(0)">📋 Resumen</li>
     <li class="navli" id="n1" onclick="sw(1)">🏛 Arquitectura</li>
     <li class="navli" id="n2" onclick="sw(2)">💻 Código</li>
     <li class="navli" id="n3" onclick="sw(3)">📦 IaC</li>
-    <li class="navli" id="n-sre" onclick="sw('sre')">🔧 SRE</li>
-    <li class="navli" id="n-finops" onclick="sw('finops')">💰 FinOps</li>
-    <li class="navli" id="n4" onclick="sw(4)">⏳ Historial</li>
-    <li class="navli" id="n5" onclick="sw(5)">📊 Dashboard</li>
+    <li class="navli" id="n4" onclick="sw(4)">🔧 SRE</li>
+    <li class="navli" id="n5" onclick="sw(5)">💰 FinOps</li>
+    <li class="navli" id="n-hist" onclick="sw('hist')">⏳ Historial</li>
+    <li class="navli" id="n-dash" onclick="sw('dash')">📊 Dashboard</li>
     <li class="navli" id="n-lab" onclick="sw('lab')">🧪 Laboratorio</li>
   </ul>
   <div style="margin-top:auto">
@@ -226,7 +228,7 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
 </aside>
 <main>
   <div class="hdr">
-    <div><h2 style="font-size:1.4rem">Modernization Engine <span style="color:var(--purple)">ARCHITECT V4</span></h2>
+    <div><h2 style="font-size:1.4rem">Modernization Squad — <span style="color:var(--purple)">LA FÁBRICA</span></h2>
     <p style="color:var(--t2);font-size:.8rem" id="hdrHost">Analisis universal: Java, Node, Python, PHP, .NET, cualquier stack</p></div>
     <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
       <button class="expbtn" onclick="downloadPdf()" id="pdf-btn">📥 PDF</button>
@@ -263,35 +265,44 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
     </div>
     <div id="mode-ssh">
       <p style="color:var(--t2);font-size:.78rem;margin-bottom:.8rem">Conecta directamente al servidor — el backend ejecuta el colector via SSH</p>
-      <div style="display:grid;grid-template-columns:2fr 1fr;gap:.6rem;align-items:end;margin-bottom:.6rem">
-        <div>
-          <label style="font-size:.7rem;color:var(--t2);display:block;margin-bottom:.3rem">Hostname / IP</label>
-          <input id="ssh-host" type="text" placeholder="servidor.corp" style="width:100%">
+      
+      <form id="ssh-form" onsubmit="event.preventDefault(); window.connectAndCollect();">
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:.6rem;align-items:end;margin-bottom:.6rem">
+          <div>
+            <label style="font-size:.7rem;color:var(--t2);display:block;margin-bottom:.3rem">Hostname / IP</label>
+            <input id="ssh-host" type="text" placeholder="servidor.corp" style="width:100%">
+          </div>
+          <div>
+            <label style="font-size:.7rem;color:var(--t2);display:block;margin-bottom:.3rem">Usuario</label>
+            <input id="ssh-user" type="text" placeholder="root" style="width:100%">
+          </div>
         </div>
-        <div>
-          <label style="font-size:.7rem;color:var(--t2);display:block;margin-bottom:.3rem">Usuario</label>
-          <input id="ssh-user" type="text" placeholder="root" style="width:100%">
+
+        <div style="display:grid;grid-template-columns:1fr 1fr 80px;gap:.6rem;align-items:end">
+          <div style="position:relative">
+            <label style="font-size:.7rem;color:var(--t2);display:block;margin-bottom:.3rem">Password / Key Passphrase</label>
+            <div style="position:relative">
+              <input id="ssh-pass" type="password" placeholder="..." style="width:100%;padding-right:30px">
+              <span id="toggle-ssh-pass" onclick="window.togglePass('ssh-pass')" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;opacity:.5;font-size:.8rem">👁️</span>
+            </div>
+          </div>
+          <div>
+            <label style="font-size:.7rem;color:var(--t2);display:block;margin-bottom:.3rem">Puerto</label>
+            <input id="ssh-port" type="number" value="22" style="width:100%">
+          </div>
+          <div style="text-align:right">
+            <button class="btn" type="submit" id="sshbtn" style="width:100%;margin:0">🔍 Analizar</button>
+          </div>
         </div>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 80px;gap:.6rem;align-items:end">
-        <div style="position:relative">
-          <label style="font-size:.7rem;color:var(--t2);display:block;margin-bottom:.3rem">Clave / Passphrase</label>
-          <input id="ssh-pass" type="password" placeholder="..." style="width:100%;padding-right:30px">
-          <span id="toggle-pass" onclick="togglePass()" style="position:absolute;right:10px;bottom:8px;cursor:pointer;font-size:12px;user-select:none;color:var(--t2)">👁️</span>
-        </div>
-        <div>
+        
+        <div style="margin-top:.8rem">
           <label style="font-size:.7rem;color:var(--t2);display:block;margin-bottom:.3rem">Llave (.pem / .key)</label>
           <input id="ssh-key-file" type="file" accept=".pem,.key,.txt" style="width:100%;font-size:.75rem;padding:.3rem 0;color:var(--t2)">
         </div>
-        <div>
-          <label style="font-size:.7rem;color:var(--t2);display:block;margin-bottom:.3rem">Puerto</label>
-          <input id="ssh-port" type="number" value="22" style="width:100%">
-        </div>
-      </div>
-      <div style="margin-top:.8rem;display:flex;gap:.8rem;align-items:center;flex-wrap:wrap">
-        <button class="btn" id="sshbtn" onclick="connectAndCollect()">🔍 Conectar y Analizar</button>
-        <span id="ssh-status" style="font-size:.78rem;color:var(--t2)"></span>
-      </div>
+
+        <div id="ssh-status" style="font-size:.78rem;color:var(--t2);margin-top:.6rem"></div>
+      </form>
+
       <!-- Progress steps durante colección SSH -->
       <div id="ssh-progress" style="display:none;margin-top:1rem;padding:.8rem;background:rgba(0,0,0,.3);border-radius:10px;border:1px solid var(--bdr)">
         <div style="font-size:.68rem;color:var(--t2);margin-bottom:.6rem;font-weight:600">PROGRESO DE RECOLECCION</div>
@@ -300,6 +311,7 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
           Lineas recolectadas: <span id="ssh-lines" style="color:var(--blue);font-weight:700">0</span>
         </div>
       </div>
+
       <div id="ssh-warn" style="display:none;margin-top:.6rem;background:rgba(249,212,35,.07);border:1px solid var(--yellow);border-radius:8px;padding:.6rem;font-size:.75rem;color:var(--yellow)">
         Backend no disponible. Ejecuta <b>start-backend.bat</b> y recarga la pagina.
       </div>
@@ -354,6 +366,16 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
       <div class="card pt"><h3 style="font-size:.9rem">Protocolos: Legacy -> Modern</h3><div id="proto"></div></div>
     </div>
     <div class="card pt"><h3 style="font-size:.9rem">Application Data Flow</h3><div class="mermaid" id="am"></div></div>
+
+    <!-- [SQUAD PM] Matriz de Prioridades Maestro -->
+    <div class="card pt" id="pm-priority-box" style="display:none;border-left:4px solid var(--purple);background:rgba(157,80,187,.03)">
+      <div style="display:flex;align-items:center;gap:.6rem;margin-bottom:.8rem">
+        <span style="font-size:1.1rem">🎖</span>
+        <h3 style="font-size:1rem;color:var(--purple)">Matriz de Prioridades Maestro (PM Synthesis)</h3>
+      </div>
+      <div id="pm-priority-list" style="display:grid;grid-template-columns:1fr 1fr;gap:.8rem"></div>
+      <div id="pm-coordination" style="font-size:.7rem;margin-top:.8rem;color:var(--t2);font-style:italic"></div>
+    </div>
   </div>
 
   <div class="page" id="p1">
@@ -411,15 +433,61 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
       <p id="strategy-rationale" style="font-size:.82rem;color:#d0d0d0;line-height:1.7"></p>
     </div>
 
+    <!-- [SQUAD DBA] Modernización de Persistencia -->
+    <div class="card pt" id="dba-box" style="display:none;border-left:4px solid var(--orange)">
+      <div style="display:flex;align-items:center;gap:.6rem;margin-bottom:.8rem">
+        <span style="font-size:1.1rem">🗄</span>
+        <h3 style="font-size:.95rem;color:var(--orange)">Modernización de Base de Datos (DBA Agent)</h3>
+        <span id="dba-engine-badge" style="margin-left:auto;font-size:.62rem;padding:.2rem .6rem;border-radius:10px;background:rgba(255,165,0,.15);color:var(--orange);border:1px solid var(--orange)"></span>
+      </div>
+      <div class="g2">
+        <div>
+          <div style="font-size:.7rem;color:var(--t2);margin-bottom:.3rem">ESTRATEGIA DE DATOS</div>
+          <div id="dba-strategy" style="font-size:.8rem;color:#ddd;line-height:1.5"></div>
+          <div id="dba-tool" style="font-size:.7rem;color:var(--green);margin-top:.4rem"></div>
+        </div>
+        <div>
+          <div style="font-size:.7rem;color:var(--t2);margin-bottom:.3rem">OBJETO DE REFACTOR (PL/SQL)</div>
+          <div id="dba-plsql-list"></div>
+        </div>
+      </div>
+      <div style="margin-top:1rem">
+        <div style="font-size:.7rem;color:var(--t2);margin-bottom:.4rem">CAMBIOS EN ESQUEMA SUGERIDOS</div>
+        <div id="dba-schema-list"></div>
+      </div>
+    </div>
+
     <div class="card pt"><h3 style="font-size:.9rem">Plan de Migracón por Sprints</h3><div id="plan" style="margin-top:1rem"></div></div>
 
     <div class="g2">
       <div class="card"><h3 style="font-size:.9rem">Cloud Target (TO-BE)</h3><div class="mermaid" id="im"></div></div>
-      <div class="card"><h3 style="font-size:.9rem">SRE Steps</h3><ul id="sre" style="list-style:none;font-size:.82rem;margin-top:.8rem"></ul></div>
     </div>
   </div>
 
-  <div class="page" id="p2">
+  <!-- ── Pilar 2: Código (Remediación y Refactoring) ───────────────────────── -->
+  <div class="page" id="p2" style="display:none">
+    <div style="display:flex;align-items:center;gap:.8rem;margin-bottom:1rem;flex-wrap:wrap">
+      <h3 style="font-size:1rem;margin:0">💻 Código — Remediación y Modernización</h3>
+      <span style="font-size:.65rem;background:rgba(0,163,255,.15);color:var(--blue);padding:.2rem .6rem;border-radius:10px;border:1px solid rgba(0,163,255,.4)">Analizado por SecurityAgent + JavaAgent</span>
+    </div>
+
+    <!-- [NUEVO] Artifact Deep Analysis Row -->
+    <div id="artifact-deep-analysis-row" style="display:none;margin-bottom:1.2rem">
+      <div class="g3">
+        <div class="card" id="artifact-metadata-box" style="border-top:3px solid var(--blue)">
+          <h4 style="font-size:.82rem;margin-bottom:.5rem">📦 Metadatos del Binario</h4>
+          <div id="artifact-metadata-content" style="font-size:.7rem;color:var(--t2);line-height:1.4"></div>
+        </div>
+        <div class="card" id="artifact-patterns-box" style="border-top:3px solid var(--yellow)">
+          <h4 style="font-size:.82rem;margin-bottom:.5rem">🧩 Patrones JEE Detectados</h4>
+          <div id="artifact-patterns-content" style="display:flex;flex-wrap:wrap;gap:.4rem"></div>
+        </div>
+        <div class="card" id="artifact-sql-box" style="border-top:3px solid var(--red)">
+          <h4 style="font-size:.82rem;margin-bottom:.5rem">🗄️ SQL Hardcodeado (Bytecode)</h4>
+          <div id="artifact-sql-list" style="max-height:120px;overflow:auto;display:flex;flex-direction:column;gap:.3rem"></div>
+        </div>
+      </div>
+    </div>
     <!-- Quick Wins -->
     <div class="card pt" id="qw-box" style="display:none">
       <div style="display:flex;align-items:center;gap:.6rem;margin-bottom:.8rem">
@@ -471,11 +539,13 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
     </div>
   </div>
 
-  <div class="page" id="p3">
+  <!-- ── Pilar 3: IaC (Infrastructure as Code) ────────────────────────────── -->
+  <div class="page" id="p3" style="display:none">
     <!-- IaC Header / Actions -->
     <div style="display:flex;align-items:center;gap:.8rem;margin-bottom:1rem;flex-wrap:wrap">
-      <h3 style="font-size:1rem;margin:0">Infrastructure as Code</h3>
-      <button class="bsm" id="iac-validate-btn" onclick="validateIaC()" style="background:rgba(0,255,150,.15);border-color:var(--green);color:var(--green)" title="Validar sintaxis de Terraform, K8s y Dockerfile">🔍 Validar IaC</button>
+      <h3 style="font-size:1rem;margin:0">📦 IaC — Infraestructura como Código</h3>
+      <span style="font-size:.65rem;background:rgba(157,80,187,.15);color:var(--purple);padding:.2rem .6rem;border-radius:10px;border:1px solid rgba(157,80,187,.3)">Generado por CloudNativeAgent</span>
+      <button class="bsm" id="iac-validate-btn" onclick="validateIaC()" style="background:rgba(0,255,150,.15);border-color:var(--green);color:var(--green);margin-left:auto" title="Validar sintaxis de Terraform, K8s y Dockerfile">🔍 Validar IaC</button>
       <button class="bsm" id="pricing-btn" onclick="loadPricing()" style="background:rgba(0,163,255,.15);border-color:var(--blue);color:var(--blue)" title="Calcular costos AWS reales del stack detectado">💰 Pricing AWS</button>
       <span id="iac-overall-badge" style="font-size:.72rem;padding:.2rem .6rem;border-radius:12px;display:none"></span>
     </div>
@@ -733,10 +803,14 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
 
 
   <!-- ── Pilar SRE ─────────────────────────────────────────────────────────── -->
-  <div class="page" id="p-sre" style="display:none">
+  <div class="page" id="p4" style="display:none">
     <div style="display:flex;align-items:center;gap:.8rem;margin-bottom:1rem;flex-wrap:wrap">
       <h3 style="font-size:1rem;margin:0">🔧 SRE — Site Reliability Engineering</h3>
       <span style="font-size:.65rem;background:rgba(0,176,155,.15);color:var(--green);padding:.2rem .6rem;border-radius:10px;border:1px solid rgba(0,176,155,.3)">Generado por CloudNativeAgent</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin-bottom:1rem">
+      <div class="card"><h3 style="font-size:.9rem">Arquitectura TO-BE</h3><div class="mermaid" id="sre-mermaid"></div></div>
+      <div class="card"><h3 style="font-size:.9rem">SRE Steps — Checklist</h3><ul id="sre" style="list-style:none;font-size:.82rem;margin-top:.8rem"></ul></div>
     </div>
     <div class="card" id="sre-health-box" style="display:none">
       <h4 style="font-size:.85rem;margin-bottom:.6rem">❤ Healthchecks Kubernetes</h4>
@@ -756,7 +830,7 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
   </div>
 
   <!-- ── Pilar FinOps ───────────────────────────────────────────────────────── -->
-  <div class="page" id="p-finops" style="display:none">
+  <div class="page" id="p5" style="display:none">
     <div style="display:flex;align-items:center;gap:.8rem;margin-bottom:1rem;flex-wrap:wrap">
       <h3 style="font-size:1rem;margin:0">💰 FinOps Pro</h3>
       <span style="font-size:.65rem;background:rgba(249,212,35,.12);color:var(--yellow);padding:.2rem .6rem;border-radius:10px;border:1px solid rgba(249,212,35,.3)">CostOptimizationAgent + Precios Reales</span>
@@ -835,7 +909,7 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
     </div>
   </div>
 
-  <div class="page" id="p4">
+  <div class="page" id="p-hist">
     <div class="card pt"><h3 style="font-size:1.2rem">Historial de Servidores Analizados</h3>
       <table id="hist-table" style="width:100%;font-size:.85rem;margin-top:1rem;">
         <thead>
@@ -860,7 +934,7 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
   </div>
 
   <!-- p5: Dashboard Ejecutivo -->
-  <div class="page" id="p5">
+  <div class="page" id="p-dash">
     <div class="g2" style="grid-template-columns:repeat(4,1fr)">
       <div class="card" style="text-align:center;border-top:3px solid var(--blue)">
         <div style="font-size:.65rem;color:var(--t2);margin-bottom:.4rem">TOTAL ESCANEOS</div>

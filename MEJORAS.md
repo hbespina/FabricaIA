@@ -308,4 +308,4 @@ npm test       # ejecutar tests
 
 **Versión:** 2.0.0  
 **Fecha:** 2026-03-27  
-**Autor:** OTSOrchestrAI Modernization Engine
+**Autor:** La Fábrica Modernization Engine

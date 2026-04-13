@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Modernization Factory — FastAPI Backend v3.0
 Features: Async Bedrock jobs, multi-model fallback, analysis cache, PostgreSQL/SQLite
@@ -64,7 +65,7 @@ logging.root.setLevel(logging.INFO)
 logging.root.handlers = [_handler]
 logging.getLogger("paramiko").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
-logger = logging.getLogger("factory")
+logger = logging.getLogger("fabrica")
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -236,7 +237,7 @@ class FetchCachedRequest(BaseModel):
 
 # ─── System Prompt ────────────────────────────────────────────────────────────
 SYSTEM_PROMPT_TEMPLATE = """
-Eres la Orquesta de Agentes de Modernización de OTSOrchestrAI — un equipo de expertos senior que produce análisis DETALLADOS y ACCIONABLES. NUNCA respondas con frases genéricas. SIEMPRE referencia componentes, versiones, puertos y rutas reales encontrados en el inventario.
+Eres la Orquesta de Agentes de La Fábrica de Modernización — un equipo de expertos senior que produce análisis DETALLADOS y ACCIONABLES. NUNCA respondas con frases genéricas. SIEMPRE referencia componentes, versiones, puertos y rutas reales encontrados en el inventario.
 
 ## TUS AGENTES
 
@@ -893,7 +894,7 @@ Retorna ÚNICAMENTE JSON válido:
 """
 
 _AGENT_MIGRATION_PROMPT = """
-Eres un Principal Migration Lead especializado en estrategias "App-First".
+Eres un Principal Migration Lead de La Fábrica especializado en estrategias "App-First".
 Tu misión es diseñar un roadmap que modernice primero el código y la plataforma de ejecución, dejando la migración de datos para una fase posterior.
 
 OBJETIVOS DEL ROADMAP:
@@ -1210,6 +1211,63 @@ REGLAS CRÍTICAS:
 """
 
 # ─── Background Job (Bedrock Async — Agentic + RAG) ─────────────────────────
+
+_AGENT_DBA_PROMPT = """
+Actuas como SENIOR DATABASE MODERNIZATION ARCHITECT & DBA (Squad Database Specialist).
+Tu mision es deconstruir la arquitectura de persistencia legada y proponer la ruta hacia Cloud-Native Databases.
+
+CHAIN OF THOUGHT:
+1. Analizar [DEEP_DISCOVERY_DATA] buscando patrones SQL, nombres de tablas, procedimientos almacenados y dialectos (Oracle, SQL Server, Sybase).
+2. Evaluar el impacto de mover logica de DB (PL/SQL, T-SQL) hacia la capa de aplicación (Java/Spring Boot).
+3. Identificar candidatos para RDS Aurora PostgreSQL o DynamoDB segun el tipo de acceso a datos.
+4. Definir la estrategia de migracion de datos: DMS (Database Migration Service), DataSync o Dump & Load?
+
+INSTRUCCIÓN CRÍTICA:
+- Detalla la conversion de tipos de datos complejos del legado al destino.
+- Si detectas procedimientos almacenados masivos, recomienda su "refactorizacion a servicios" en lugar de migracion directa.
+- Propone indices y estrategias de particionamiento para escala cloud.
+
+Retorna UNICAMENTE JSON valido:
+{{
+  "database_modernization": {{
+    "current_stack": "Oracle 11g|SQL Server 2008|etc",
+    "engine_migration": "Aurora PostgreSQL 15.x",
+    "logic_migration_strategy": "Refactor stored procedures to Spring Boot Services",
+    "migration_tool": "AWS DMS (Database Migration Service)",
+    "data_volume_estimate": "Medium|High|Low based on inventory clues"
+  }},
+  "schema_changes": [
+    {{"table_pattern": "nombre_o_patron", "change": "descripcion tecnica", "impact": "Alto|Medio|Bajo"}}
+  ],
+  "plsql_refactor_candidates": [
+    {{"name": "nombre_proc_u_objeto", "complexity": "Alta|Media", "recommendation": "descripcion"}}
+  ]
+}}
+"""
+
+_AGENT_PM_PROMPT = """
+Actuas como SQUAD LEADER de La Fábrica & PRINCIPAL PROJECT MANAGER.
+Tu mision es sintetizar el trabajo de toda la celula de agentes en una vision estrategica unica para el cliente.
+
+CONTEXTO: Recibiras los outputs de los agentes: Security, Code, Java(Reverse Engineer), CloudNative(SRE), Business, CostOptimization y DBA.
+
+TAREAS:
+1. Conciliar conflictos: Si el SRE propone algo que el FinOps dice que es muy caro, prioriza la rentabilidad sin comprometer la seguridad.
+2. Crear la Matriz de Priorizacion Maestro: Que debe hacerse en el Dia 1?
+3. Generar el Executive Summary definitivo (Sustituye a todos los anteriores).
+
+Retorna UNICAMENTE JSON valido:
+{{
+  "executive_summary": "Vision consolidada de 4-5 oraciones que resume los riesgos, el plan tecnico y el beneficio financiero.",
+  "master_priorities": [
+    {{"task": "tarea estrategica", "rationale": "por que es la #1", "impact": "Alto", "sprint": "0|1"}}
+  ],
+  "squad_coordination": "Breve nota sobre como los agentes trabajaron juntos (ej. 'SecOps y SRE coordinaron el hardening inicial')",
+  "overall_readiness_score": 0.0,
+  "change_management_tips": ["tip 1", "tip 2"]
+}}
+"""
+
 def _call_agent(bedrock, model_id: str, max_tokens: int, system_prompt: str, user_msg: str) -> dict:
     """Llama a un agente específico. Lanza excepción si falla."""
     resp = bedrock.converse(
@@ -1303,7 +1361,7 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
             if sections["DEPENDENCIES"]:
                 parts.append("[DEPENDENCIES]\n" + "\n".join(sections["DEPENDENCIES"]))
             if sections["BYTECODE_DATA"]:
-                parts.append("[DEEP_DISCOVERY_DATA]\n" + "\n".join(sections["BYTECODE_DATA"]))
+                parts.append("[BYTECODE_DATA]\n" + "\n".join(sections["BYTECODE_DATA"]))
             if sections["OTHER"]:
                 parts.append("[OTHER]\n" + "\n".join(sections["OTHER"]))
             # BUSINESS_GOALS — con prioridad App-First
@@ -1353,21 +1411,44 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
             return _call_agent(bedrock, mid, 3072,
                                _common_ctx + stack_ctx + _AGENT_COST_OPT_PROMPT, ctx)
 
-        # Etapa 1a: Security + Code + Business en paralelo (+ ReverseEngineer/CN si es Java)
-        n_agents = 6 if is_java_artifact else 4
-        _update_job_status(job_id, "running", f"Ejecutando orquestación multi-agente ({detected_stack})...")
+        def run_dba():
+            return _call_agent(bedrock, mid, 3500,
+                               _common_ctx + stack_ctx + _AGENT_DBA_PROMPT, inv_msg)
 
-        with ThreadPoolExecutor(max_workers=4) as ex:
+        def run_pm():
+            # Consolidar todo el contexto previo para el PM
+            synthesis_ctx = {
+                "security": sec_result,
+                "code": code_result,
+                "java_reverse_engineer": java_result,
+                "sre_cloudnative": cn_result,
+                "business_roi": biz_result,
+                "cost_optimization": cost_opt_result,
+                "dba_database": dba_result
+            }
+            ctx = f"RESULTADOS DE TODOS LOS AGENTES:\n{json.dumps(synthesis_ctx, ensure_ascii=False)[:10000]}"
+            return _call_agent(bedrock, mid, 4000,
+                               _common_ctx + _AGENT_PM_PROMPT, ctx)
+
+        # Etapa 1a: Security + Code + Business + DBA en paralelo (+ ReverseEngineer/CN si es Java)
+        dba_result = {}
+        pm_result  = {}
+        n_agents = 7 if is_java_artifact else 5
+        _update_job_status(job_id, "running", f"Stage 1 — Ejecutando Squad Técnico ({detected_stack})...")
+
+        with ThreadPoolExecutor(max_workers=5) as ex:
             f_sec  = ex.submit(run_security)
             f_code = ex.submit(run_code)
             f_biz  = ex.submit(run_business)
+            f_dba  = ex.submit(run_dba)
             f_java = ex.submit(run_java)        if is_java_artifact else None
-            f_cn   = ex.submit(run_cloudnative) # CloudNative corre siempre para generar Dockerfiles
+            f_cn   = ex.submit(run_cloudnative) 
 
             futures_map = {
                 f_sec:  ("sec",  sec_result),
                 f_code: ("code", code_result),
                 f_biz:  ("biz",  biz_result),
+                f_dba:  ("dba",  dba_result),
             }
             if f_java: futures_map[f_java] = ("java",        java_result)
             if f_cn:   futures_map[f_cn]   = ("cloudnative", cn_result)
@@ -1400,6 +1481,14 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
                         cost_opt_result.update(res)
                 except Exception as e:
                     logger.warning("[Job %s] Agente '%s' falló: %s", job_id[:8], lbl, e)
+
+        # Etapa 1c: PM — Síntesis Final (Corre solo después de que todos terminaron)
+        _update_job_status(job_id, "running", "Stage 3 — PM Squad Synthesis...")
+        try:
+            pm_result = run_pm()
+        except Exception as e:
+            logger.warning("[Job %s] Agente PM falló: %s", job_id[:8], e)
+            pm_result = {"executive_summary": "Falla en síntesis PM. Consultar detalles por agente."}
 
         agents_ok = bool(sec_result or mig_result or code_result or java_result)
 
@@ -1474,9 +1563,12 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
                 "rightsizing":      cost_opt_result.get("rightsizing", {}),
                 "sprint_cost":      cost_opt_result.get("sprint_cost", {}),
             },
+            "database":            dba_result.get("database_modernization", {}),
+            "dba_findings":        dba_result,
+            "pm":                  pm_result,
             "detected_stack":      detected_stack,
             "reverse_engineering": java_result.get("reverse_engineering", {}),
-            "_analysis_method":    "agentic_parallel" + ("_java" if is_java_artifact else ""),
+            "_analysis_method":    "agentic_parallel_v5.2",
             "_rag_used":           bool(rag_ctx),
         }
         logger.info("[Job %s] Agéntico OK — sec=%d mig=%d code=%d biz=%s rag=%s",
@@ -2863,7 +2955,7 @@ async def get_aws_pricing(scan_id: str, env: str = "prod", region: str = "us-eas
 # ─── FinOps — Fetchers de precios públicos ────────────────────────────────────
 
 def _fetch_azure_prices(region: str = "eastus") -> dict:
-    """Llama Azure Retail Prices API (sin auth). Retorna dict service→$/hr."""
+    """Llama Azure Retail Prices API (sin auth). Retorna dict service -> $/hr."""
     import requests as req
     baseline = {
         "container": 0.0160,
