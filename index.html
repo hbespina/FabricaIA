@@ -206,13 +206,15 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
 <aside>
   <div class="logo">MODERNIZATION FACTORY</div>
   <ul style="padding:0">
-    <li class="navli on" id="n0" onclick="sw(0)">🧬 Analisis de Codigo</li>
-    <li class="navli" id="n1" onclick="sw(1)">🖥 Infraestructura</li>
-    <li class="navli" id="n2" onclick="sw(2)">🗺 Plan de Migracion</li>
-    <li class="navli" id="n3" onclick="sw(3)">📦 IaC Generator</li>
-    <li class="navli" id="n4" onclick="sw(4)">⏳ Historial de Escaneos</li>
-    <li class="navli" id="n5" onclick="sw(5)">📊 Dashboard Ejecutivo</li>
-    <li class="navli" id="n-lab" onclick="sw('lab')">🧪 Laboratorio Local</li>
+    <li class="navli on" id="n0" onclick="sw(0)">📋 Resumen</li>
+    <li class="navli" id="n1" onclick="sw(1)">🏛 Arquitectura</li>
+    <li class="navli" id="n2" onclick="sw(2)">💻 Código</li>
+    <li class="navli" id="n3" onclick="sw(3)">📦 IaC</li>
+    <li class="navli" id="n-sre" onclick="sw('sre')">🔧 SRE</li>
+    <li class="navli" id="n-finops" onclick="sw('finops')">💰 FinOps</li>
+    <li class="navli" id="n4" onclick="sw(4)">⏳ Historial</li>
+    <li class="navli" id="n5" onclick="sw(5)">📊 Dashboard</li>
+    <li class="navli" id="n-lab" onclick="sw('lab')">🧪 Laboratorio</li>
   </ul>
   <div style="margin-top:auto">
     <div style="padding:.5rem .8rem;background:rgba(0,0,0,.3);border-radius:8px;margin-bottom:.4rem;font-size:.7rem;color:var(--t2);display:flex;justify-content:space-between;align-items:center">
@@ -228,6 +230,7 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
     <p style="color:var(--t2);font-size:.8rem" id="hdrHost">Analisis universal: Java, Node, Python, PHP, .NET, cualquier stack</p></div>
     <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
       <button class="expbtn" onclick="downloadPdf()" id="pdf-btn">📥 PDF</button>
+      <button class="expbtn" onclick="downloadMigrationBundle()" id="bundle-btn" style="display:none;background:rgba(0,255,150,.12);border-color:var(--green);color:var(--green)" title="Descarga ZIP con Dockerfile, K8s, Terraform, scripts y runbooks listos para desplegar">📦 Bundle</button>
       <button class="expbtn" onclick="exportReport()">🖨 Imprimir</button>
       <button class="expbtn" onclick="forceReanalyze()" id="reanalyze-btn" style="display:none" title="Ignorar caché y generar nuevo análisis con IA">🔄 Re-analizar</button>
       <button class="expbtn" onclick="openJiraModal()" id="jira-btn" style="display:none">🎫 Jira</button>
@@ -381,7 +384,6 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
       <div class="mermaid" id="current-arch-diagram"></div>
     </div>
 
-    <!-- Matriz de Riesgos -->
     <div class="card pt" id="risk-box" style="display:none">
       <h3 style="font-size:.95rem;margin-bottom:.8rem">Matriz de Riesgos</h3>
       <table style="width:100%;font-size:.75rem;border-collapse:collapse">
@@ -398,23 +400,7 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
       </table>
     </div>
 
-    <div class="g2">
-      <div class="card"><h3 style="font-size:.9rem">Cloud Target (TO-BE)</h3><div class="mermaid" id="im"></div></div>
-      <div class="card"><h3 style="font-size:.9rem">SRE Steps</h3><ul id="sre" style="list-style:none;font-size:.82rem;margin-top:.8rem"></ul></div>
-    </div>
-    <div class="card"><h3 style="font-size:.9rem">TCO &amp; ROI <button class="bsm" onclick="tog('tcod','tcob')">Detalles</button></h3>
-      <div style="display:flex;gap:2rem;flex-wrap:wrap;margin-top:.8rem">
-        <div><div style="font-size:.7rem;color:var(--t2)">OPEX/mes</div><div id="fop" style="font-size:1.2rem;font-weight:700;color:var(--blue)">-</div></div>
-        <div><div style="font-size:.7rem;color:var(--t2)">Migracion</div><div id="fmi" style="font-size:1.2rem;font-weight:700;color:var(--yellow)">-</div></div>
-        <div><div style="font-size:.7rem;color:var(--t2)">Payback</div><div id="fpa" style="font-size:1.2rem;font-weight:700;color:var(--green)">-</div></div>
-        <div><div style="font-size:.7rem;color:var(--t2)">Costo inaccion</div><div id="fin" style="font-size:1.2rem;font-weight:700;color:var(--red)">-</div></div>
-      </div>
-      <div class="iref" id="tcod" style="margin-top:.8rem;"><table style="width:100%;font-size:.75rem"><tr><td>Lic. Perpetua</td><td id="tcper" style="color:var(--blue); text-align:right">-</td></tr><tr><td>Lic. Anual</td><td id="tcann" style="color:var(--blue); text-align:right">-</td></tr><tr><td>Costos Laborales (año)</td><td id="tclab" style="color:var(--yellow); text-align:right">-</td></tr><tr><td>TCO 5 años (Legacy)</td><td id="tcfive" style="color:var(--red); font-weight:700; text-align:right">-</td></tr><tr><td>TCO 5 años (Moderno)</td><td id="tcfivem" style="color:var(--green); font-weight:700; text-align:right">-</td></tr><tr><td>Ahorro Total 5 años</td><td id="tcsave" style="color:var(--green); font-weight:700; text-align:right">-</td></tr><tr><td>ROI %</td><td id="tcroi" style="color:var(--green); font-weight:700; text-align:right">-</td></tr></table></div>
-    </div>
-  </div>
-
-  <div class="page" id="p2">
-    <!-- Estrategia de Migración -->
+    <!-- Estrategia de Migración (Movido de Código a Arquitectura) -->
     <div class="card pt" id="strategy-box" style="display:none">
       <div style="display:flex;align-items:center;gap:.6rem;margin-bottom:.8rem">
         <span style="font-size:1.1rem">🗺</span>
@@ -425,6 +411,15 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
       <p id="strategy-rationale" style="font-size:.82rem;color:#d0d0d0;line-height:1.7"></p>
     </div>
 
+    <div class="card pt"><h3 style="font-size:.9rem">Plan de Migracón por Sprints</h3><div id="plan" style="margin-top:1rem"></div></div>
+
+    <div class="g2">
+      <div class="card"><h3 style="font-size:.9rem">Cloud Target (TO-BE)</h3><div class="mermaid" id="im"></div></div>
+      <div class="card"><h3 style="font-size:.9rem">SRE Steps</h3><ul id="sre" style="list-style:none;font-size:.82rem;margin-top:.8rem"></ul></div>
+    </div>
+  </div>
+
+  <div class="page" id="p2">
     <!-- Quick Wins -->
     <div class="card pt" id="qw-box" style="display:none">
       <div style="display:flex;align-items:center;gap:.6rem;margin-bottom:.8rem">
@@ -439,8 +434,6 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
       <h3 style="font-size:1rem;color:var(--blue)">🧠 Análisis Detallado de los Agentes</h3>
       <div id="agent-summary" style="margin-top:.8rem;font-size:.82rem;line-height:1.8;color:#d0d0d0;white-space:pre-line"></div>
     </div>
-
-    <div class="card pt"><h3 style="font-size:.9rem">Plan de Migracion por Sprints</h3><div id="plan" style="margin-top:1rem"></div></div>
 
     <div class="card pt" id="remed-box" style="display:none">
       <h3 style="font-size:.9rem">Remediación de Código</h3>
@@ -739,7 +732,110 @@ td code{background:rgba(0,0,0,.3);padding:.1rem .35rem;border-radius:3px;font-si
   </div>
 
 
-  <div class="page" id="p4">
+  <!-- ── Pilar SRE ─────────────────────────────────────────────────────────── -->
+  <div class="page" id="p-sre" style="display:none">
+    <div style="display:flex;align-items:center;gap:.8rem;margin-bottom:1rem;flex-wrap:wrap">
+      <h3 style="font-size:1rem;margin:0">🔧 SRE — Site Reliability Engineering</h3>
+      <span style="font-size:.65rem;background:rgba(0,176,155,.15);color:var(--green);padding:.2rem .6rem;border-radius:10px;border:1px solid rgba(0,176,155,.3)">Generado por CloudNativeAgent</span>
+    </div>
+    <div class="card" id="sre-health-box" style="display:none">
+      <h4 style="font-size:.85rem;margin-bottom:.6rem">❤ Healthchecks Kubernetes</h4>
+      <div id="sre-health-content"></div>
+    </div>
+    <div class="card" id="sre-12factor-box" style="display:none;margin-top:1rem">
+      <h4 style="font-size:.85rem;color:var(--yellow);margin-bottom:.6rem">12-Factor App — Violaciones Detectadas</h4>
+      <div id="sre-12factor-list"></div>
+    </div>
+    <div class="card" id="sre-runbook-box" style="display:none;margin-top:1rem">
+      <h4 style="font-size:.85rem;margin-bottom:.6rem">📋 Runbooks SRE — Post-Deploy</h4>
+      <div id="sre-runbook-list" style="display:flex;flex-direction:column;gap:.6rem"></div>
+    </div>
+    <div id="sre-empty" style="text-align:center;padding:3rem;color:var(--t2);font-size:.8rem">
+      Analiza un artefacto Java para generar el contenido SRE
+    </div>
+  </div>
+
+  <!-- ── Pilar FinOps ───────────────────────────────────────────────────────── -->
+  <div class="page" id="p-finops" style="display:none">
+    <div style="display:flex;align-items:center;gap:.8rem;margin-bottom:1rem;flex-wrap:wrap">
+      <h3 style="font-size:1rem;margin:0">💰 FinOps Pro</h3>
+      <span style="font-size:.65rem;background:rgba(249,212,35,.12);color:var(--yellow);padding:.2rem .6rem;border-radius:10px;border:1px solid rgba(249,212,35,.3)">CostOptimizationAgent + Precios Reales</span>
+      <button class="bsm" id="finops-load-btn" onclick="loadFinOps()" style="background:rgba(0,163,255,.15);border-color:var(--blue);color:var(--blue)">🔄 Actualizar Precios</button>
+      <span id="finops-cache-badge" style="font-size:.62rem;display:none"></span>
+    </div>
+    <!-- ... Resto del contenido de FinOps ... -->
+    <div id="finops-business-box" style="display:none;margin-bottom:1.2rem">
+      <h4 style="font-size:.9rem;margin-bottom:.7rem;color:var(--blue)">💼 Análisis Financiero — TCO Legacy vs AWS</h4>
+      <div id="finops-csuite" style="font-size:.8rem;color:#e0e0e0;background:rgba(0,163,255,.05);border:1px solid rgba(0,163,255,.2);border-radius:8px;padding:.7rem 1rem;margin-bottom:.8rem;line-height:1.7"></div>
+      <div class="g2" style="margin-bottom:.7rem">
+        <div class="card" style="padding:.8rem">
+          <div style="font-size:.65rem;color:var(--t2);font-weight:700;margin-bottom:.5rem">COSTO LEGACY (anual)</div>
+          <div id="finops-tco-legacy"></div>
+        </div>
+        <div class="card" style="padding:.8rem">
+          <div style="font-size:.65rem;color:var(--green);font-weight:700;margin-bottom:.5rem">COSTO AWS (anual)</div>
+          <div id="finops-tco-aws"></div>
+        </div>
+      </div>
+      <div class="card" style="padding:.8rem">
+        <div style="font-size:.65rem;color:var(--t2);font-weight:700;margin-bottom:.5rem">ROI PROYECTADO</div>
+        <div id="finops-roi-content" style="display:flex;gap:2rem;flex-wrap:wrap"></div>
+      </div>
+    </div>
+    <div id="finops-tabs-box" style="display:none;margin-top:1.2rem">
+      <div style="display:flex;gap:.4rem;margin-bottom:1rem;border-bottom:1px solid var(--bdr);padding-bottom:.6rem;flex-wrap:wrap">
+        <button class="bsm" id="finops-tab-mc"  onclick="showFinOpsTab('mc')"  style="opacity:1">☁ Multi-Cloud</button>
+        <button class="bsm" id="finops-tab-opt" onclick="showFinOpsTab('opt')" style="opacity:.5">⚡ AWS Optimizer</button>
+        <button class="bsm" id="finops-tab-rs"  onclick="showFinOpsTab('rs')"  style="opacity:.5">📐 Right-Sizing</button>
+        <button class="bsm" id="finops-tab-sc"  onclick="showFinOpsTab('sc')"  style="opacity:.5">🗓 Sprint Cost</button>
+      </div>
+      <div id="finops-tab-mc-content">
+        <div id="finops-mc-recommendation" style="display:none;margin-bottom:1rem;padding:.8rem 1rem;border-radius:10px;background:rgba(0,176,155,.08);border:1px solid rgba(0,176,155,.3)"></div>
+        <table style="width:100%;border-collapse:collapse;font-size:.78rem;margin-bottom:1rem">
+          <thead>
+            <tr style="border-bottom:1px solid var(--bdr)">
+              <th style="text-align:left;padding:.4rem;color:var(--t2)">Cloud</th>
+              <th style="text-align:right;padding:.4rem;color:var(--t2)">Contenedor</th>
+              <th style="text-align:right;padding:.4rem;color:var(--t2)">DB</th>
+              <th style="text-align:right;padding:.4rem;color:var(--t2)">Cache</th>
+              <th style="text-align:right;padding:.4rem;color:var(--t2)">LB</th>
+              <th style="text-align:right;padding:.4rem;color:var(--t2);font-weight:700">Total/mes</th>
+            </tr>
+          </thead>
+          <tbody id="finops-mc-table-body"></tbody>
+        </table>
+        <div id="finops-mc-pros" style="display:grid;grid-template-columns:repeat(3,1fr);gap:.8rem;margin-top:.5rem"></div>
+      </div>
+      <div id="finops-tab-opt-content" style="display:none">
+        <div id="finops-opt-summary" style="margin-bottom:.8rem;padding:.6rem .8rem;background:rgba(0,163,255,.06);border-radius:8px;font-size:.78rem"></div>
+        <div id="finops-opt-list" style="display:flex;flex-direction:column;gap:.6rem"></div>
+      </div>
+      <div id="finops-tab-rs-content" style="display:none">
+        <div id="finops-rs-signals" style="margin-bottom:.8rem;padding:.6rem .8rem;background:rgba(157,80,187,.06);border-radius:8px;font-size:.75rem"></div>
+        <table style="width:100%;border-collapse:collapse;font-size:.78rem">
+          <thead>
+            <tr style="border-bottom:1px solid var(--bdr)">
+              <th style="text-align:left;padding:.4rem;color:var(--t2)">Servicio</th>
+              <th style="text-align:center;padding:.4rem;color:var(--t2)">Default Factory</th>
+              <th style="text-align:center;padding:.4rem;color:var(--t2)">Recomendado</th>
+              <th style="text-align:right;padding:.4rem;color:var(--t2)">Ahorro/mes</th>
+              <th style="text-align:left;padding:.4rem;color:var(--t2)">Razón</th>
+            </tr>
+          </thead>
+          <tbody id="finops-rs-table-body"></tbody>
+        </table>
+      </div>
+      <div id="finops-tab-sc-content" style="display:none">
+        <div id="finops-sc-summary" style="display:grid;grid-template-columns:repeat(3,1fr);gap:.8rem;margin-bottom:1rem"></div>
+        <div id="finops-sc-list" style="display:flex;flex-direction:column;gap:.6rem"></div>
+      </div>
+    </div>
+    <div id="finops-empty" style="text-align:center;padding:3rem;color:var(--t2);font-size:.8rem">
+      Analiza un artefacto Java para generar el análisis FinOps
+    </div>
+  </div>
+
+  <div class="page" id="p-hist">
     <div class="card pt"><h3 style="font-size:1.2rem">Historial de Servidores Analizados</h3>
       <table id="hist-table" style="width:100%;font-size:.85rem;margin-top:1rem;">
         <thead>
