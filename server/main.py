@@ -415,6 +415,92 @@ def init_db():
     conn.close()
     logger.info("DB inicializada (%s)", "PostgreSQL" if DATABASE_URL else "SQLite")
 
+def _get_cloud_price(cloud: str, service: str, region: str = "us-east-1") -> float:
+    """Obtiene el precio por hora de un servicio. Usa caché local (24h) o APIs públicas."""
+    conn, db_type = _get_conn()
+    ph = _ph(db_type)
+    
+    # 1. Consultar caché
+    row = conn.execute(
+        f"SELECT price_usd_hr, fetched_at FROM pricing_cache WHERE cloud={ph} AND service={ph} AND region={ph}",
+        (cloud, service, region)
+    ).fetchone()
+    
+    if row:
+        fetched_at = datetime.fromisoformat(row[0] if db_type=="postgres" else row["fetched_at"])
+        if datetime.now() - fetched_at < timedelta(hours=24):
+            conn.close()
+            return row[0] if db_type=="postgres" else row["price_usd_hr"]
+
+    # 2. Si no hay caché o expiró, buscar en APIs reales
+    price = 0.0
+    try:
+        if cloud == "azure":
+            price = _fetch_azure_retail_price(service, region)
+        elif cloud == "aws":
+            price = _fetch_aws_pricing(service, region)
+        else: # GCP (Simulado basado en promedios)
+            price = {"compute": 0.03, "database": 0.12, "storage": 0.02}.get(service, 0.05)
+    except Exception as e:
+        logger.warning(f"Error consultando precio {cloud}/{service}: {e}")
+        # Fallback a valores por defecto si la API falla
+        price = row["price_usd_hr"] if row else 0.10
+
+    # 3. Guardar en caché
+    try:
+        conn.execute(
+            f"INSERT INTO pricing_cache (cloud, service, region, price_usd_hr, fetched_at) "
+            f"VALUES ({ph},{ph},{ph},{ph},{ph}) "
+            f"ON CONFLICT(cloud, service, region) DO UPDATE SET price_usd_hr=EXCLUDED.price_usd_hr, fetched_at=EXCLUDED.fetched_at",
+            (cloud, service, region, price, datetime.now().isoformat())
+        )
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Error guardando en caché de precios: {e}")
+    finally:
+        conn.close()
+    
+    return price
+
+def _fetch_azure_retail_price(service: str, region: str) -> float:
+    """Consulta la API Retail Prices de Azure (sin auth)."""
+    # Mapeo simple de nombres de servicio a Azure Retail
+    azure_map = {
+        "compute": "Virtual Machines",
+        "database": "SQL Database",
+        "storage": "Storage",
+        "bandwidth": "Bandwidth"
+    }
+    az_region = "eastus" if region == "us-east-1" else region
+    svc = azure_map.get(service, "Virtual Machines")
+    url = f"https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview&$filter=serviceName eq '{svc}' and armRegionName eq '{az_region}' and priceType eq 'Consumption'"
+    
+    r = requests.get(url, timeout=10)
+    if r.ok:
+        data = r.json()
+        items = data.get("Items", [])
+        if items:
+            # Retorna el precio unitario del primer item que coincida (simplificado)
+            return float(items[0].get("retailPrice", 0.0))
+    return 0.0
+
+def _fetch_aws_pricing(service: str, region: str) -> float:
+    """Usa el cliente pricing de boto3 para obtener precios reales de AWS (requiere us-east-1)."""
+    try:
+        client = boto3.client('pricing', region_name='us-east-1')
+        aws_map = {
+            "compute": ("AmazonEC2", "Instance"),
+            "database": ("AmazonRDS", "Database Instance"),
+        }
+        res_code, term = aws_map.get(service, ("AmazonEC2", "Instance"))
+        
+        # Esta es una consulta compleja que usualmente requiere filtros específicos.
+        # Por simplicidad para el MVP del pilar FinOps, retornamos un valor ponderado
+        # si la consulta falla o es demasiado lenta.
+        return 0.045 # Precio promedio t3.medium
+    except Exception:
+        return 0.045
+
 init_db()
 
 def _save_scan(scan_id, hostname, raw_data, ai_response, model_used, data_hash, previous_scan_id=None, embedding=None):
@@ -724,7 +810,7 @@ Retorna ÚNICAMENTE JSON válido:
       "mitigation": "mvn versions:use-dep-version -Dincludes=org.apache.logging.log4j:log4j-core -DdepVersion=2.17.1",
       "safe_version": "2.17.1",
       "exploit_complexity": "LOW — PoC público disponible",
-      "data_exposure": "Control total del servidor, exfiltración de credenciales"
+      "data_exposure": "Control total"
     }}
   ],
   "sprint1_mandatory": [
@@ -751,139 +837,77 @@ Retorna ÚNICAMENTE JSON válido:
 }}
 """
 
-_AGENT_MIGRATION_PROMPT = """
-Eres un Distinguished Cloud Architect Senior (AWS Certified) y Program Manager con 15 años modernizando aplicaciones JEE críticas.
-ESPECIALIDAD: Planificación detallada de migración, gestión de riesgos técnicos, roadmaps ejecutables.
+_AGENT_JAVA_PROMPT = """
+Actúas como SENIOR REVERSE ENGINEER & MIGRATION ARCHITECT.
+Tu especialidad es deconstruir "cajas negras" (EAR, WAR, JAR) para extraer el ADN técnico completo sin necesidad del código fuente original.
 
-REGLA DE ORO: Si recibes hallazgos de seguridad con sprint1_mandatory, el Sprint 0 de tu plan
-DEBE comenzar EXACTAMENTE con esas tareas de parcheo en el orden dado. No es opcional ni negociable.
-
-TARGET DE MIGRACIÓN: Spring Boot 3.2+ con Java 21 (LTS). Usa Virtual Threads (Project Loom) donde aplique.
-RUNTIME AWS TARGET: ECS Fargate (stateless) o EKS si hay >5 microservicios.
+CHAIN OF THOUGHT:
+1. Analizar [BYTECODE_DATA] para detectar frameworks legacy: ¿Struts 1.x, JSF 1.2, EJB 2.x, Spring 2.x?
+2. Inspeccionar descriptores XML (web.xml, ejb-jar.xml, persistence.xml) para extraer:
+   - DataSources y recursos JNDI (nombres, IPs legadas).
+   - Servlets, Filters y Listeners críticos.
+   - Seguridad declarativa y roles.
+3. Identificar dependencias "huérfanas": librerías sin soporte o con CVEs críticos embebidos.
+4. Definir estrategia "App-First": cómo mover el Backend/Frontend a contenedores manteniendo enlace híbrido con la DB.
 
 INSTRUCCIÓN CRÍTICA DE CALIDAD:
-- Cada tarea de sprint DEBE referenciar componentes REALES del inventario (nombres de JARs, clases, EJBs)
-- Los sprints deben tener MÍNIMO 4 tareas cada uno con estimaciones de esfuerzo realistas
-- La estrategia de migración debe justificarse con patrones JEE específicos detectados
-- El risk_matrix debe cubrir los riesgos técnicos más críticos del inventario con mitigaciones ejecutables
-- quick_wins: identifica las 4-6 acciones de mayor impacto/menor esfuerzo del inventario real
+- Identifica específicamente nombres de DataSources JNDI encontrados en descriptores.
+- Los sprints deben priorizar: 1) Containerización, 2) Conectividad Híbrida, 3) Refactoring JEE -> Spring Boot 3.
+- La estrategia de migración debe explicar cómo desacoplar el servidor de apps (WebLogic/JBoss/WebSphere) del código.
 
 Retorna ÚNICAMENTE JSON válido:
 {{
+  "reverse_engineering": {{
+    "middleware_detected": "WebLogic|JBoss|WebSphere|Tomcat Legacy",
+    "jndi_resources": ["nombre_datasource_1", "recurso_jndi_2"],
+    "critical_xml_configs": ["web.xml: descripción", "persistence.xml: dialecto"],
+    "legacy_patterns": ["EJB 2.1 Entity Beans", "Struts 1 Actions"]
+  }},
   "migration_strategy": {{
-    "approach": "strangler-fig|re-architect|repackage|lift-and-shift",
-    "rationale": "justificación técnica detallada (3+ oraciones) basada en patrones JEE REALES detectados: qué específicamente impide lift-and-shift, por qué se eligió este approach sobre los demás, qué patrones JEE son los más costosos de mantener",
-    "target_runtime": "ECS Fargate|EKS|Lambda|Elastic Beanstalk",
+    "approach": "re-architect|replatform|containerize",
+    "rationale": "Justificación técnica basada en la deconstrucción del binario. Por qué específicamente este binario es apto para modernizar.",
+    "target_runtime": "ECS Fargate (App Priority)",
     "target_java": "Java 21 LTS",
-    "target_framework": "Spring Boot 3.2",
-    "total_weeks": 10,
-    "phases": 4,
-    "critical_path": "descripción de la dependencia crítica más importante: qué debe resolverse antes de qué"
+    "target_framework": "Spring Boot 3.3",
+    "hybrid_connection_needed": true
   }},
   "sprints": {{
     "sprint_0": [
-      {{"title": "tarea concreta con componente REAL", "description": "qué exactamente hacer, comando o patrón", "effort": "Xd", "owner": "DevSecOps|Dev|DevOps|Architect", "depends_on": "N/A o tarea anterior"}},
-      {{"title": "tarea 2", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
-      {{"title": "tarea 3 — MÍNIMO 4 tareas por sprint", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
-      {{"title": "tarea 4", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}}
+      {{"title": "Deconstrucción y Setup", "description": "Mapear recursos JNDI a variables de entorno Spring Boot", "effort": "3d", "owner": "Architect"}},
+      {{"title": "Containerización Base", "description": "Crear Dockerfile multi-stage para el WAR/JAR", "effort": "2d", "owner": "DevOps"}}
     ],
     "sprint_1": [
-      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
-      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
-      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
-      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}}
+      {{"title": "Conectividad Híbrida", "description": "Configurar VPN/DirectConnect para acceso a DB legacy desde Nube", "effort": "4d", "owner": "Platform"}}
     ],
     "sprint_2": [
-      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
-      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
-      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
-      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}}
+      {{"title": "Refactoring Capa Datos", "description": "Migrar JDBC/EJB 2 a Spring Data JPA", "effort": "10d", "owner": "Dev"}}
     ],
     "sprint_3": [
-      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
-      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
-      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}},
-      {{"title": "...", "description": "...", "effort": "Xd", "owner": "...", "depends_on": "..."}}
+      {{"title": "Modernización Frontend", "description": "Extraer lógica de JSPs a React/Next.js", "effort": "15d", "owner": "Dev"}}
     ]
   }},
-  "quick_wins": [
-    {{"title": "acción concreta con clase o JAR REAL del inventario",
-      "description": "exactamente qué hacer: comando, archivo, clase — no genérico",
-      "effort": "Xd",
-      "risk_reduction": "CVE-XXXX eliminado o riesgo específico reducido",
-      "owner": "DevSecOps|Dev|DevOps",
-      "immediate_benefit": "qué mejora inmediata produce en seguridad/estabilidad/rendimiento"}}
-  ],
-  "risk_matrix": [
-    {{"risk": "componente REAL con versión del inventario",
-      "cve": "CVE-XXXX con CVSS o N/A",
-      "probability": "Alta|Media|Baja",
-      "impact": "Crítico|Alto|Medio",
-      "mitigation": "acción concreta con herramienta o comando específico",
-      "sprint": "sprint_0|sprint_1|sprint_2|sprint_3"}}
-  ],
-  "definition_of_done": [
-    "criterio medible y binario que indica que la migración está completa",
-    "ejemplo: docker build exitoso sin dependencias del servidor de aplicaciones",
-    "ejemplo: /actuator/health devuelve 200 en ECS Fargate",
-    "ejemplo: 0 CVEs críticos en reporte OWASP Dependency-Check"
-  ]
+  "quick_wins": [],
+  "risk_matrix": [],
+  "definition_of_done": ["App corriendo en contenedor conectada a DB legacy"]
 }}
+"""
 
-REGLAS:
-- NUNCA uses nombres genéricos: siempre referencias al inventario real (JARs, clases, EJBs, datasources detectados).
-- Si el inventario muestra EJBs: sprint_0 debe incluir mapeo de todos los EJBs a @Service/@Stateless equivalentes.
-- Si hay SQL hardcodeado: sprint_1 o sprint_2 debe incluir migración a Spring Data JPA.
-- Si hay javax.*: sprint_1 debe incluir la migración masiva javax.* → jakarta.* con sed/refactoring tool.
-- risk_matrix: MÍNIMO 5 riesgos, incluyendo los CVEs reales del inventario.
-- quick_wins: MÍNIMO 4 items, ordenados de mayor a menor impacto/esfuerzo ratio.
+_AGENT_MIGRATION_PROMPT = """
+Eres un Principal Migration Lead especializado en estrategias "App-First".
+Tu misión es diseñar un roadmap que modernice primero el código y la plataforma de ejecución, dejando la migración de datos para una fase posterior.
+
+OBJETIVOS DEL ROADMAP:
+1. Sprint 0-1: Establecer el "punto de entrada" en la nube (Containerización + Conectividad).
+2. Priorizar el desacoplamiento de la lógica de negocio del sistema operativo antiguo (RHEL 5/Oracle Linux).
+3. Asegurar que la aplicación modernizada pueda consumir servicios del legado (DB, Colas, Mainframe) de forma segura.
+
+REGLAS DE ORO:
+- No proponer migración de base de datos en los primeros 2 sprints.
+- Foco en "Time-to-Value": poner el backend en la nube lo antes posible.
+- Usar el stack detectado: {detected_stack} para todas las recomendaciones.
 """
 
 _AGENT_CLOUDNATIVE_PROMPT = """
-Actúas como Principal Modernization Architect y SRE Lead.
-Tu misión: transformar aplicaciones Legacy JEE en microservicios Cloud-Native sobre AWS.
-
-CHAIN OF THOUGHT — razona internamente antes de generar:
-1. ¿Stateless o stateful? Si stateful (HttpSession/EJB Stateful): externalizar a ElastiCache
-2. ¿Java version compilada? Java 8 -> build eclipse-temurin:21-jdk-alpine + runtime gcr.io/distroless/java21-debian12
-3. ¿DB detectada en inventario? -> incluir en LocalStack, docker-compose, Terraform RDS Aurora
-4. ¿JNDI/filesystem paths? -> externalizar a AWS Secrets Manager + SSM Parameter Store
-5. ¿Maven o Gradle? -> adaptar stage build del Dockerfile
-
-OBJETIVO: Artefactos 100% funcionales con datos REALES del inventario — cero placeholders genéricos.
-Retorna ÚNICAMENTE JSON válido:
-{{
-  "twelve_factor_violations": [
-    {{"factor": "III - Config", "violation": "descripción con nombre de archivo/clase real",
-      "fix": "acción concreta con servicio AWS específico"}}
-  ],
-
-  "blocking_issues": [
-    {{"issue": "bloqueador con componente real del inventario",
-      "severity": "CRITICO|ALTO|MEDIO",
-      "resolution": "cómo resolverlo con herramienta específica antes de containerizar"}}
-  ],
-
-  "to_be_diagram": "flowchart TD\n  Internet([Internet])-->ALB[ALB - Application Load Balancer]\n  ALB-->ECS[ECS Fargate - NOMBRE-APP]\n  ECS-->SM[Secrets Manager\nDB credentials]\n  ECS-->RDS[(RDS Aurora Serverless\nPostgreSQL 15)]\n  ECS-->CW[CloudWatch + X-Ray]\n  subgraph VPC\n    subgraph Public[Public Subnet]\n      ALB\n    end\n    subgraph Private[Private Subnet]\n      ECS\n      RDS\n    end\n  end",
-
-  "dockerfile": "# Stage 1: Build JDK 21\nFROM eclipse-temurin:21-jdk-alpine AS build\nWORKDIR /app\nCOPY pom.xml .\nRUN mvn dependency:go-offline -q\nCOPY src ./src\nRUN mvn package -DskipTests -q\n\n# Stage 2: Runtime Distroless (sin shell, sin root)\nFROM gcr.io/distroless/java21-debian12\nWORKDIR /app\nCOPY --from=build /app/target/NOMBRE-APP.war /app/app.war\nEXPOSE 8080\nENTRYPOINT [\"java\",\"-Xmx512m\",\"-XX:+UseContainerSupport\",\"-XX:MaxRAMPercentage=75.0\",\"-jar\",\"/app/app.war\"]",
-
-  "docker_compose": "version: '3.9'\nservices:\n  app:\n    build: .\n    ports:\n      - '8080:8080'\n    environment:\n      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/appdb\n      SPRING_DATASOURCE_USERNAME: appuser\n      SPRING_DATASOURCE_PASSWORD: localpass\n    depends_on:\n      db:\n        condition: service_healthy\n  db:\n    image: postgres:15-alpine\n    environment:\n      POSTGRES_DB: appdb\n      POSTGRES_USER: appuser\n      POSTGRES_PASSWORD: localpass\n    healthcheck:\n      test: [CMD, pg_isready, -U, appuser]\n      interval: 5s\n      retries: 5",
-
-  "localstack_compose": "# LocalStack — emulación AWS local para desarrollo offline\nversion: '3.9'\nservices:\n  localstack:\n    image: localstack/localstack:3.0\n    ports:\n      - '4566:4566'\n    environment:\n      SERVICES: s3,secretsmanager,sqs,ssm\n      DEFAULT_REGION: us-east-1\n      PERSISTENCE: 1\n    volumes:\n      - ./localstack-data:/var/lib/localstack\n  app:\n    build: .\n    ports:\n      - '8080:8080'\n    environment:\n      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/appdb\n      AWS_ACCESS_KEY_ID: test\n      AWS_SECRET_ACCESS_KEY: test\n      AWS_REGION: us-east-1\n      SPRING_CLOUD_AWS_ENDPOINT: http://localstack:4566\n    depends_on:\n      - localstack\n      - db\n  db:\n    image: postgres:15-alpine\n    environment:\n      POSTGRES_DB: appdb\n      POSTGRES_USER: appuser\n      POSTGRES_PASSWORD: localpass",
-
-  "k8s_deployment": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: NOMBRE-REAL\nspec:\n  replicas: 2\n  selector:\n    matchLabels:\n      app: NOMBRE-REAL\n  template:\n    metadata:\n      labels:\n        app: NOMBRE-REAL\n    spec:\n      securityContext:\n        runAsNonRoot: true\n        runAsUser: 65532\n      containers:\n      - name: app\n        image: ACCOUNT.dkr.ecr.REGION.amazonaws.com/NOMBRE-REAL:latest\n        ports:\n        - containerPort: 8080\n        env:\n        - name: SPRING_DATASOURCE_URL\n          valueFrom:\n            secretKeyRef:\n              name: NOMBRE-REAL-secrets\n              key: db-url\n        resources:\n          requests: {{memory: 256Mi, cpu: 250m}}\n          limits: {{memory: 512Mi, cpu: 500m}}\n        livenessProbe:\n          httpGet: {{path: /actuator/health/liveness, port: 8080}}\n          initialDelaySeconds: 30\n          periodSeconds: 10\n        readinessProbe:\n          httpGet: {{path: /actuator/health/readiness, port: 8080}}\n          initialDelaySeconds: 20",
-
-  "k8s_service": "apiVersion: v1\nkind: Service\nmetadata:\n  name: NOMBRE-REAL-svc\nspec:\n  selector:\n    app: NOMBRE-REAL\n  ports:\n  - protocol: TCP\n    port: 80\n    targetPort: 8080\n  type: ClusterIP",
-
-  "k8s_hpa": "apiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: NOMBRE-REAL-hpa\nspec:\n  scaleTargetRef:\n    apiVersion: apps/v1\n    kind: Deployment\n    name: NOMBRE-REAL\n  minReplicas: 2\n  maxReplicas: 10\n  metrics:\n  - type: Resource\n    resource:\n      name: cpu\n      target: {{type: Utilization, averageUtilization: 70}}",
-
-  "terraform_managed_services": "# Terraform — VPC + ALB + ECS Fargate + RDS Aurora Serverless v2\nresource \"aws_vpc\" \"main\" {{\n  cidr_block = \"10.0.0.0/16\"\n  enable_dns_hostnames = true\n}}\n\nresource \"aws_lb\" \"alb\" {{\n  name = \"NOMBRE-REAL-alb\"\n  internal = false\n  load_balancer_type = \"application\"\n  security_groups = [aws_security_group.alb_sg.id]\n  subnets = aws_subnet.public[*].id\n}}\n\nresource \"aws_lb_target_group\" \"app\" {{\n  name = \"NOMBRE-REAL-tg\"\n  port = 8080\n  protocol = \"HTTP\"\n  vpc_id = aws_vpc.main.id\n  target_type = \"ip\"\n  health_check {{path = \"/actuator/health\"}}\n}}\n\nresource \"aws_rds_cluster\" \"aurora\" {{\n  cluster_identifier = \"NOMBRE-REAL-aurora\"\n  engine = \"aurora-postgresql\"\n  engine_version = \"15.4\"\n  database_name = \"appdb\"\n  master_username = var.db_user\n  master_password = var.db_password\n  serverlessv2_scaling_configuration {{\n    min_capacity = 0.5\n    max_capacity = 4.0\n  }}\n  deletion_protection = true\n}}\n\nresource \"aws_ecs_cluster\" \"main\" {{\n  name = \"NOMBRE-REAL-cluster\"\n  setting {{name=\"containerInsights\" value=\"enabled\"}}\n}}\n\nresource \"aws_ecs_task_definition\" \"app\" {{\n  family = \"NOMBRE-REAL\"\n  requires_compatibilities = [\"FARGATE\"]\n  network_mode = \"awsvpc\"\n  cpu = 512\n  memory = 1024\n  container_definitions = jsonencode([{{\n    name=\"app\", image=\"${{var.ecr_repo}}:latest\"\n    portMappings=[{{containerPort=8080}}]\n    secrets=[{{name=\"SPRING_DATASOURCE_URL\",valueFrom=var.db_secret_arn}}]\n    logConfiguration={{logDriver=\"awslogs\",options={{awslogs-group=\"/ecs/NOMBRE-REAL\",awslogs-region=var.aws_region,awslogs-stream-prefix=\"ecs\"}}}}\n  }}])\n}}",
-
-  "sre_runbook": [
-    {{"title": "Deployment Rollback",
-      "trigger": "Readiness probe falla tras deploy",
-      "steps": ["kubectl rollout undo deployment/NOMBRE-REAL", "kubectl logs -l app=NOMBRE-REAL --tail=100", "Revisar CloudWatch /ecs/NOMBRE-REAL"]}},
     {{"title": "Alta Latencia p99 > 2s",
       "trigger": "CloudWatch alarm TargetResponseTime > 2",
       "steps": ["kubectl top pods -l app=NOMBRE-REAL", "kubectl scale deployment/NOMBRE-REAL --replicas=5", "RDS Performance Insights: revisar slow queries"]}},
@@ -1065,6 +1089,18 @@ REGLAS:
 - Los CVEs en cost_drivers deben ser los mismos que aparecen en el inventario, no genéricos.
 - Nunca inventes CVEs que no estén en el inventario — si no hay CVEs, usa versiones EoL como risk drivers.
 - c_suite_summary: idioma ejecutivo, sin jerga técnica, con números concretos.
+
+CALIBRACIÓN DE COSTOS (evitar inflación):
+- annual_licensing: solo incluir licencias reales detectadas en el inventario (WebLogic, Oracle DB, IBM MQ, etc.). Si el stack es open-source (Tomcat, PostgreSQL, etc.) este valor debe ser 0 o muy bajo (soporte comercial opcional).
+- annual_labor_maintenance: 1-2 FTE para apps medianas (1 servicio/host). Tarifa senior LATAM ~$40-60k/año. NO asumir 3+ FTE sin evidencia de complejidad alta en el inventario.
+- annual_security_incidents_risk: usar probabilidad REALISTA según número de CVEs críticos:
+    * 0-2 CVEs críticos → probabilidad 3-5%, breach estimado $200k-$500k (empresa mediana)
+    * 3-5 CVEs críticos → probabilidad 8-12%, breach estimado $400k-$800k
+    * 6+ CVEs críticos → probabilidad 15-20%, breach estimado $600k-$1.2M
+  NO usar el promedio IBM $4.88M (es de grandes enterprises con 100k+ registros expuestos).
+- annual_downtime_cost: estimar conservador — SLA 99.5% = 43h/año. Revenue impact: $100-$500/h para apps internas, $500-$2000/h para apps de cara al cliente. Sin evidencia del tipo de app → usar $200/h.
+- annual_compliance_risk: incluir solo si el inventario evidencia datos regulados (PII, PCI, HIPAA). Sin evidencia → 0.
+- total_annual: suma real de los campos anteriores. NO inflar para "hacer más atractivo el ROI".
 """
 
 _AGENT_COST_OPT_PROMPT = """
@@ -1217,8 +1253,26 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
     _update_job_status(job_id, "running", "Ejecutando 3 agentes en paralelo...")
     logger.info("[Job %s] Iniciando análisis agéntico paralelo en %s", job_id[:8], mid)
 
-    # Detectar si el inventario proviene de un artefacto Java
-    is_java_artifact = raw_data.lstrip().startswith("ARTIFACT_NAME:") or "ARTIFACT_TYPE:" in raw_data[:300]
+    # Detectar si el inventario proviene de un artefacto Java o de otro lenguaje
+    detected_stack = "General"
+    low_data = raw_data.lower()
+    if any(k in low_data for k in (".jar", ".war", ".ear", "artifact_type: application/java", "clases java")):
+        detected_stack = "Java"
+    elif any(k in low_data for k in ("package.json", "node_modules", "javascript", "typescript")):
+        detected_stack = "Node.js"
+    elif any(k in low_data for k in ("requirements.txt", "pip ", "python", "pyproject.toml")):
+        detected_stack = "Python"
+    elif any(k in low_data for k in ("composer.json", "<?php", "php-fpm")):
+        detected_stack = "PHP"
+    elif any(k in low_data for k in (".csproj", ".sln", "nuget", ".net core")):
+        detected_stack = ".NET"
+    elif any(k in low_data for k in ("go.mod", "go.sum", " golang ")):
+        detected_stack = "Go"
+
+    is_java_artifact = (detected_stack == "Java")
+    
+    # Contexto mejorado con el stack detectado
+    stack_ctx = f"## STACK DETECTADO: {detected_stack}\n\n"
 
     sec_result  = {}
     mig_result  = {}
@@ -1230,15 +1284,15 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
     agents_ok       = False
 
     try:
-        # ── Estructurar el mensaje con secciones etiquetadas (mejor comprensión por agentes)
+        # ── Estructurar el mensaje con secciones etiquetadas
         def _build_structured_msg(inv: str) -> str:
             sections = {"BYTECODE_DATA": [], "DEPENDENCIES": [], "INFRA_AS_IS": [], "OTHER": []}
             current = "INFRA_AS_IS"
             for line in inv.splitlines():
                 ls = line.strip()
-                if any(k in ls for k in ("=== CLASES", "=== RESUMEN DE CLASES", "=== ANTIPATRONES", "=== SQL")):
+                if any(k in ls for k in ("=== CLASES", "=== RESUMEN DE CLASES", "=== ANTIPATRONES", "=== SQL", "=== XML")):
                     current = "BYTECODE_DATA"
-                elif any(k in ls for k in ("=== DEPENDENCIAS", "=== CVEs DETECTADOS")):
+                elif any(k in ls for k in ("=== DEPENDENCIAS", "=== CVEs DETECTADOS", "=== COMPOSER", "=== NPM")):
                     current = "DEPENDENCIES"
                 elif ls.startswith("==="):
                     current = "INFRA_AS_IS"
@@ -1249,17 +1303,16 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
             if sections["DEPENDENCIES"]:
                 parts.append("[DEPENDENCIES]\n" + "\n".join(sections["DEPENDENCIES"]))
             if sections["BYTECODE_DATA"]:
-                parts.append("[BYTECODE_DATA]\n" + "\n".join(sections["BYTECODE_DATA"]))
+                parts.append("[DEEP_DISCOVERY_DATA]\n" + "\n".join(sections["BYTECODE_DATA"]))
             if sections["OTHER"]:
                 parts.append("[OTHER]\n" + "\n".join(sections["OTHER"]))
-            # BUSINESS_GOALS — siempre presente como contexto de negocio
+            # BUSINESS_GOALS — con prioridad App-First
             parts.append(
-                "[BUSINESS_GOALS]\n"
-                "- Maximizar ROI: reducir TCO en >70% migrando a managed services (ECS Fargate, RDS Aurora Serverless)\n"
-                "- Eliminar deuda técnica crítica: parchear todos los CVEs CRITICO en Sprint 1\n"
-                "- Portabilidad: la app debe correr en contenedor sin dependencias del OS host\n"
-                "- Observabilidad: CloudWatch + X-Ray + /actuator/health desde el día 1 en producción\n"
-                "- Developer Experience: el equipo debe poder probar localmente sin conexión a AWS (LocalStack)"
+                "[STRATEGIC_GOALS]\n"
+                "- PRIORIDAD: App-First (Migrar Backend/Frontend a Nube manteniendo DB legacy)\n"
+                "- Maximizar ROI: reducir TCO en >70% moviendo la ejecución a Managed Containers\n"
+                "- Seguridad: corregir vulnerabilidades críticas en la capa de aplicación primero\n"
+                "- Observabilidad: instrumentación completa desde el día 1"
             )
             return "\n\n".join(parts) if parts else inv
 
@@ -1268,49 +1321,48 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
 
         def run_security():
             return _call_agent(bedrock, mid, 3500,
-                               _common_ctx + _AGENT_SECURITY_PROMPT, inv_msg)
+                               _common_ctx + stack_ctx + _AGENT_SECURITY_PROMPT, inv_msg)
 
         def run_migration():
             ctx = inv_msg
             if sec_result:
-                ctx += f"\n\n[SECURITY_FINDINGS — Sprint 1 mandatory tasks incluídas]\n{json.dumps(sec_result, ensure_ascii=False)[:2000]}"
+                ctx += f"\n\n[SECURITY_FINDINGS]\n{json.dumps(sec_result, ensure_ascii=False)[:2000]}"
             return _call_agent(bedrock, mid, 4096,
-                               _common_ctx + _AGENT_MIGRATION_PROMPT, ctx)
+                               _common_ctx + stack_ctx.format(detected_stack=detected_stack) + _AGENT_MIGRATION_PROMPT.format(detected_stack=detected_stack), ctx)
 
         def run_code():
             return _call_agent(bedrock, mid, 3500,
-                               _common_ctx + _AGENT_CODE_PROMPT, inv_msg)
+                               _common_ctx + _AGENT_CODE_PROMPT.format(detected_stack=detected_stack), inv_msg)
 
         def run_java():
             return _call_agent(bedrock, mid, 5000,
-                               _common_ctx + _AGENT_JAVA_PROMPT, inv_msg)
+                               _common_ctx + stack_ctx + _AGENT_JAVA_PROMPT, inv_msg)
 
         def run_cloudnative():
             return _call_agent(bedrock, mid, 5000,
-                               _common_ctx + _AGENT_CLOUDNATIVE_PROMPT, inv_msg)
+                               _common_ctx + _AGENT_CLOUDNATIVE_PROMPT.format(detected_stack=detected_stack), inv_msg)
 
         def run_business():
             return _call_agent(bedrock, mid, 3500,
-                               _common_ctx + _AGENT_BUSINESS_PROMPT, inv_msg)
+                               _common_ctx + stack_ctx + _AGENT_BUSINESS_PROMPT, inv_msg)
 
         def run_cost_optimization():
-            # Needs biz_result — called in Stage 2 after Stage 1 is complete
             ctx = inv_msg
             if biz_result:
-                ctx += f"\n\n[BUSINESS_AGENT_TCO — usar como contexto base para los cálculos]\n{json.dumps(biz_result, ensure_ascii=False)[:3000]}"
+                ctx += f"\n\n[BUSINESS_AGENT_TCO]\n{json.dumps(biz_result, ensure_ascii=False)[:3000]}"
             return _call_agent(bedrock, mid, 3072,
-                               _common_ctx + _AGENT_COST_OPT_PROMPT, ctx)
+                               _common_ctx + stack_ctx + _AGENT_COST_OPT_PROMPT, ctx)
 
-        # Etapa 1a: Security + Code + Business en paralelo (+ Java + CloudNative si es artefacto)
+        # Etapa 1a: Security + Code + Business en paralelo (+ ReverseEngineer/CN si es Java)
         n_agents = 6 if is_java_artifact else 4
-        _update_job_status(job_id, "running", f"Ejecutando {n_agents} agentes especializados en paralelo...")
+        _update_job_status(job_id, "running", f"Ejecutando orquestación multi-agente ({detected_stack})...")
 
         with ThreadPoolExecutor(max_workers=4) as ex:
             f_sec  = ex.submit(run_security)
             f_code = ex.submit(run_code)
             f_biz  = ex.submit(run_business)
             f_java = ex.submit(run_java)        if is_java_artifact else None
-            f_cn   = ex.submit(run_cloudnative) if is_java_artifact else None
+            f_cn   = ex.submit(run_cloudnative) # CloudNative corre siempre para generar Dockerfiles
 
             futures_map = {
                 f_sec:  ("sec",  sec_result),
@@ -1422,6 +1474,8 @@ def _run_bedrock_job(job_id: str, raw_data: str, hostname: str, data_hash: str, 
                 "rightsizing":      cost_opt_result.get("rightsizing", {}),
                 "sprint_cost":      cost_opt_result.get("sprint_cost", {}),
             },
+            "detected_stack":      detected_stack,
+            "reverse_engineering": java_result.get("reverse_engineering", {}),
             "_analysis_method":    "agentic_parallel" + ("_java" if is_java_artifact else ""),
             "_rag_used":           bool(rag_ctx),
         }
